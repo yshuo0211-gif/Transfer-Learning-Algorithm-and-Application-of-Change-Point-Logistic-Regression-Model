@@ -1,0 +1,4072 @@
+---
+title: "ToSNR-Trans"
+author: "杨硕"
+date: "2025-11-10"
+output: html_document
+---
+
+```{r}
+############################
+### Step0:数据预处理-tha ###
+############################
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+# 提取指定列
+load("/Users/post/Downloads/tha_bmic.RData")
+
+tha_selected <- tha[, c("GDM", "ghb", "Age", "Ethnicity", "IVF", "Parity", 
+                        "BMI", "HB", "FF", "MCV", "MCH")]
+
+# 去除 NA 样本
+tha_selected <- na.omit(tha_selected)
+
+# 转换变量类型
+tha_selected$Age <- as.numeric(tha_selected$Age)
+tha_selected$GDM <- as.numeric(tha_selected$GDM)
+
+tha_selected$Ethnicity <- as.factor(tha_selected$Ethnicity)
+tha_selected$IVF <- as.factor(tha_selected$IVF)
+tha_selected$Parity <- as.factor(tha_selected$Parity)
+tha_selected$BMI <- as.factor(tha_selected$BMI)
+
+# 保存为新数据集
+tha_cleaned <- tha_selected
+
+# 要处理的变量
+vars_to_scale <- c("ghb", "Age", "HB", "FF", "MCV", "MCH")
+
+# 筛选 Age <= 38
+tha_cleaned_trun <- tha_cleaned %>%
+  filter(Age <= 38)
+
+# 定义一个帮助函数：对向量 scale() 后把 attr 复制回结果向量
+preserve_scale <- function(x) {
+  sx <- scale(x)            # 返回带 attr 的 matrix (n x 1)
+  out <- as.vector(sx)      # 转成向量（会丢掉 matrix 的属性）
+  # 把 scale() 的属性显式赋回单列向量
+  attr(out, "scaled:center") <- attr(sx, "scaled:center")
+  attr(out, "scaled:scale")  <- attr(sx, "scaled:scale")
+  out
+}
+
+# 对选定的每一列应用 preserve_scale，并回写到数据框
+tha_scaled_trun <- tha_cleaned_trun
+tha_scaled_trun[vars_to_scale] <- lapply(tha_scaled_trun[vars_to_scale], preserve_scale)
+
+tha_scaled <- tha_cleaned
+tha_scaled[vars_to_scale] <- lapply(tha_scaled[vars_to_scale], preserve_scale)
+
+tha_selected$Ethnicity = ifelse(tha_selected$Ethnicity %in% c(2), 1, 0)
+tha_cleaned$Ethnicity = ifelse(tha_cleaned$Ethnicity %in% c(2), 1, 0)
+tha_scaled$Ethnicity = ifelse(tha_scaled$Ethnicity %in% c(2), 1, 0)
+
+tha_cleaned_trun$Ethnicity = ifelse(tha_cleaned_trun$Ethnicity %in% c(2), 1, 0)
+tha_scaled_trun$Ethnicity = ifelse(tha_scaled_trun$Ethnicity %in% c(2), 1, 0)
+```
+
+
+
+```{r}
+#############################
+### Step0:数据预处理-norm ###
+#############################
+
+load("/Users/post/Downloads/norm_new.RData")
+
+columns_to_denormalize <- c("Age", "HB", "MCH", "MCV", "FF", "ghb")
+norm_init <- norm
+for (col_name in columns_to_denormalize) {
+  
+  # 提取该列的 center (均值 mu) 和 scale (标准差 sigma) 属性
+  # 假设这些属性是在对原始数据进行 scale() 操作后保留在 norm 数据框的列属性中
+  
+  mu <- attr(norm[[col_name]], "scaled:center")
+  sigma <- attr(norm[[col_name]], "scaled:scale")
+  
+  # 执行反标准化操作： X = Z * sigma + mu
+  norm_init[[col_name]] <- (norm_init[[col_name]] * sigma) + mu
+}
+```
+
+
+
+```{r}
+########################
+### Step0:数据预处理 ###
+########################
+
+# 统一基准水平的函数
+set_reference_level <- function(data_frame, var_name, ref_level) {
+  var_col <- data_frame[[var_name]]
+  
+  # 确保它是因子
+  if (!is.factor(var_col)) {
+    var_col <- factor(var_col)
+  }
+  
+  # 重新设置因子的水平顺序，将基准水平放在第一位
+  current_levels <- levels(var_col)
+  
+  # 检查基准水平是否存在
+  if (!(ref_level %in% current_levels)) {
+    warning(paste("Reference level", ref_level, "not found in", var_name, "levels."))
+    return(data_frame)
+  }
+  
+  # 将 ref_level 移到列表的开头
+  new_levels <- c(ref_level, setdiff(current_levels, ref_level))
+  
+  # 应用新的水平顺序
+  data_frame[[var_name]] <- factor(var_col, levels = new_levels)
+  return(data_frame)
+}
+
+# 对目标域和源域应用修改
+tha_scaled_trun <- set_reference_level(tha_scaled_trun, "BMI", "1")
+norm <- set_reference_level(norm, "BMI", "1")
+
+tha_scaled_trun <- set_reference_level(tha_scaled_trun, "Ethnicity", "0")
+norm <- set_reference_level(norm, "Ethnicity", "0")
+
+tha_scaled_trun <- set_reference_level(tha_scaled_trun, "IVF", "0")
+norm <- set_reference_level(norm, "IVF", "0")
+
+tha_scaled_trun <- set_reference_level(tha_scaled_trun, "Parity", "0")
+norm <- set_reference_level(norm, "Parity", "0")
+```
+
+
+
+```{r}
+########################
+### Step1:描述性分析 ###
+########################
+
+proportion_gdm_tha <- sum(tha_scaled_trun$GDM == 1, na.rm = TRUE) / nrow(tha_scaled_trun)
+cat("tha样本GDM=1 样本占比: ", round(proportion_gdm_tha * 100, 2), "%\n")
+proportion_gdm_norm <- sum(norm$GDM == 1, na.rm = TRUE) / nrow(norm)
+cat("norm样本GDM=1 样本占比: ", round(proportion_gdm_norm * 100, 2), "%\n")
+
+chi_sq_result <- prop.test(x = c(sum(tha_scaled_trun$GDM == 1, na.rm = TRUE), sum(norm$GDM == 1, na.rm = TRUE)), n = c(nrow(tha_scaled_trun), nrow(norm)))
+print(chi_sq_result$p.value)
+
+numeric_vars <- c("ghb", "Age", "HB", "FF", "MCV", "MCH")
+factor_vars <- c("Ethnicity", "IVF", "Parity", "BMI")
+# --- 1. 处理 tha_cleaned_trun 数据集 ---
+cat("==========================================\n")
+cat("      tha_cleaned_trun 数据集统计        \n")
+cat("==========================================\n")
+
+## 数值型变量：均值和方差
+cat("\n--- 数值型变量 (均值和方差) ---\n")
+tha_numeric_stats <- sapply(tha_cleaned_trun[numeric_vars], function(x) {
+  c(Mean = mean(x, na.rm = TRUE), SE = sqrt(var(x, na.rm = TRUE)))
+})
+print(tha_numeric_stats)
+
+## 分类变量：因子比例
+cat("\n--- 分类变量 (各因子比例) ---\n")
+for (var in factor_vars) {
+  if (var %in% names(tha_cleaned_trun)) {
+    cat("\n[", var, "]\n")
+    # 使用 table 计数，prop.table 计算比例
+    tha_factor_prop <- prop.table(table(tha_cleaned_trun[[var]], useNA = "ifany"))
+    print(tha_factor_prop)
+  }
+}
+
+# --- 2. 处理 norm_init 数据集 ---
+cat("\n==========================================\n")
+cat("         norm_init 数据集统计             \n")
+cat("==========================================\n")
+
+## 数值型变量：均值和方差
+cat("\n--- 数值型变量 (均值和方差) ---\n")
+norm_numeric_stats <- sapply(norm_init[numeric_vars], function(x) {
+  c(Mean = mean(x, na.rm = TRUE), SE = sqrt(var(x, na.rm = TRUE)))
+})
+print(norm_numeric_stats)
+
+## 分类变量：因子比例
+cat("\n--- 分类变量 (各因子比例) ---\n")
+for (var in factor_vars) {
+  if (var %in% names(norm_init)) {
+    cat("\n[", var, "]\n")
+    # 使用 table 计数，prop.table 计算比例
+    norm_factor_prop <- prop.table(table(norm_init[[var]], useNA = "ifany"))
+    print(norm_factor_prop)
+  }
+}
+```
+
+
+
+```{r}
+########################
+### Step2:卡方/t检验 ###
+########################
+
+# 连续变量（t检验）
+cont_vars <- c("ghb", "Age", "HB", "FF", "MCV", "MCH")
+
+cat("==== 连续变量 t 检验 ====\n")
+for (v in cont_vars) {
+  # 提取两组向量（去掉 NA）
+  x1 <- na.omit(tha_cleaned_trun[[v]])
+  x2 <- na.omit(norm_init[[v]])
+  
+  # 独立样本 t 检验（不假设方差相等）
+  t_res <- t.test(x1, x2, var.equal = FALSE)
+  
+  cat("\n变量:", v, "\n")
+  cat("  t =", round(t_res$statistic, 3),
+      " df =", round(t_res$parameter, 1),
+      " p =", signif(t_res$p.value, 3), "\n")
+  if (t_res$p.value < 0.05) cat("  → 差异显著\n")
+  else cat("  → 无显著差异\n")
+}
+
+# 分类变量（卡方检验）
+cat_vars <- c("Ethnicity", "IVF", "Parity", "BMI")
+
+cat("\n==== 分类变量 卡方检验 ====\n")
+for (v in cat_vars) {
+  # 构造列联表
+  tab <- table(
+    group = c(rep("tha_cleaned_trun", nrow(tha_cleaned_trun)),
+              rep("norm_init", nrow(norm_init))),
+    var = c(as.character(tha_cleaned_trun[[v]]),
+            as.character(norm_init[[v]]))
+  )
+  
+  # 卡方检验（自动修正）
+  chi_res <- suppressWarnings(chisq.test(tab))
+  
+  cat("\n变量:", v, "\n")
+  cat("  卡方值 =", round(chi_res$statistic, 3),
+      " df =", chi_res$parameter,
+      " p =", signif(chi_res$p.value, 3), "\n")
+  if (chi_res$p.value < 0.05) cat("  → 差异显著\n")
+  else cat("  → 无显著差异\n")
+}
+```
+
+
+
+```{r}
+###########################
+### Step3:无阈值GLM建模 ###
+###########################
+
+model_formula <- GDM ~ .
+
+# 拟合模型
+logistic_model_norm <- glm(
+  formula = model_formula,
+  data = norm,
+  family = binomial(link = "logit")
+)
+
+# 输出拟合结果（包括系数、标准误差、p 值、AIC等）
+print("--- norm 数据框的 Logistic 模型拟合结果 ---")
+summary(logistic_model_norm)
+
+# 拟合模型
+logistic_model_tha <- glm(
+  formula = model_formula,
+  data = tha_scaled_trun,
+  family = binomial(link = "logit")
+)
+
+# 输出拟合结果
+print("--- tha_scaled_trun 数据框的 Logistic 模型拟合结果 ---")
+summary(logistic_model_tha)
+```
+
+
+
+```{r}
+######################################
+### Step4:阈值效应检验及To-SNR优化 ###
+######################################
+
+# score-style 检验是否存在阈值效应（基于 phi_mean）
+score_test_for_threshold <- function(var_vec, Y, fitted_model, M = 10) {
+  mu1 <- predict(fitted_model, type = "response")
+  mu0 <- mu1 * (1 - mu1)
+  n <- length(Y)
+  X.matrix <- model.matrix(fitted_model)         # 设计矩阵 (n x p)
+  # candidate taus: quantiles
+  phi_value <- as.numeric(quantile(var_vec, probs = (1:M) / (M + 1), na.rm = TRUE))
+  # phi_function return n-vector
+  phi_function <- function(tau) as.numeric(var_vec > tau) * (var_vec - tau)
+  aa <- sapply(phi_value, phi_function)
+  phi_mean <- matrix(rowMeans(aa), ncol = 1)
+  D <- diag(as.vector(mu0))
+  l0 <- as.numeric(t(phi_mean) %*% (Y - mu1))
+  # V1 calculation (as in你的代码)
+  V1 <- t(phi_mean) %*% D %*% X.matrix %*% solve(t(X.matrix) %*% D %*% X.matrix) %*% t(X.matrix) %*% D %*% phi_mean
+  var_l0 <- as.numeric(t(phi_mean) %*% D %*% phi_mean - V1)
+  # 防护
+  if (is.na(var_l0) || var_l0 <= 0) {
+    return(list(s0 = NA, p.value = NA))
+  }
+  s0 <- as.numeric(l0 / sqrt(var_l0))
+  p.value <- 2 * (1 - pnorm(abs(s0)))
+  return(list(s0 = s0, p.value = p.value, phi_mean = phi_mean, phi_value = phi_value))
+}
+
+# score-style 检验是否存在阈值效应（基于特定phi）
+score_test_for_threshold_simp <- function(var_vec, Y, fitted_model, tau) {
+  mu1 <- predict(fitted_model, type = "response")     # 拟合概率
+  mu0 <- mu1 * (1 - mu1)
+  X.matrix <- model.matrix(fitted_model)
+  D <- diag(as.vector(mu0))
+  
+  # 定义 phi 函数
+  phi_function <- function(tau_value) as.numeric(var_vec > tau_value) * (var_vec - tau_value)
+  
+  # 对每个 tau 单独计算统计量
+  results <- lapply(tau, function(tau_value) {
+    phi_vec <- matrix(phi_function(tau_value), ncol = 1)
+    l0 <- as.numeric(t(phi_vec) %*% (Y - mu1))
+    V1 <- t(phi_vec) %*% D %*% X.matrix %*%
+      solve(t(X.matrix) %*% D %*% X.matrix) %*%
+      t(X.matrix) %*% D %*% phi_vec
+    var_l0 <- as.numeric(t(phi_vec) %*% D %*% phi_vec - V1)
+    
+    if (is.na(var_l0) || var_l0 <= 0) {
+      s0 <- NA
+      p.value <- NA
+    } else {
+      s0 <- as.numeric(l0 / sqrt(var_l0))
+      p.value <- 2 * (1 - pnorm(abs(s0)))
+    }
+    
+    data.frame(tau = tau_value, s0 = s0, p.value = p.value)
+  })
+  
+  # 合并为表格输出
+  results_df <- do.call(rbind, results)
+  rownames(results_df) <- NULL
+  
+  return(results_df)
+}
+
+# 在给定当前模型和数据上，用网格搜索估计最佳 tau（以 AIC 最小化为准）
+estimate_tau_by_grid <- function(var_vec, dat_full, base_formula, grid_tau = NULL, ngrid = 100) {
+  # base_formula: character or formula for current model WITHOUT the new phi term,
+  #              e.g. "Y ~ X + Ethnicity + BMI + ..."
+  if (is.null(grid_tau)) {
+    grid_tau <- seq(min(var_vec, na.rm = TRUE), max(var_vec, na.rm = TRUE), length.out = ngrid)
+  }
+  best_tau <- NA
+  best_aic <- Inf
+  for (tau in grid_tau) {
+    phi_col <- as.numeric(var_vec > tau) * (var_vec - tau)
+    dat_tmp <- dat_full
+    dat_tmp$phi_tmp <- phi_col
+    # fit glm quickly
+    fm <- try(glm(as.formula(paste(base_formula, "+ phi_tmp")), family = binomial, data = dat_tmp), silent = TRUE)
+    if (inherits(fm, "try-error")) next
+    aic_val <- AIC(fm)
+    if (!is.na(aic_val) && aic_val < best_aic) {
+      best_aic <- aic_val
+      best_tau <- tau
+    }
+  }
+  return(list(best_tau = best_tau, best_aic = best_aic))
+}
+
+# 计算 AUC 辅助
+calc_auc <- function(model, data) {
+  preds <- predict(model, newdata = data, type = "response")
+  roc_obj <- roc(data$Y, preds, quiet = TRUE)
+  return(list(auc = as.numeric(auc(roc_obj)), roc = roc_obj))
+}
+
+ToSNR_logistic_1dim <- function(tau0) {
+  #' tau0: 初始阈值，命名向量，如 c(ghb = -0.797)
+  
+  erro <- FALSE
+  eta <- tau0 * 0 + 1   # 初始化 eta 向量
+  j <- 1
+  
+  # 假设全局变量已经存在：Y, X, Z
+  # X: 单阈值变量，向量或单列 data.frame
+  # Z: 协变量，data.frame，可为空
+  
+  while (max(abs(eta)) > 1e-7 & j <= 100 & !erro) {
+    tau_prev <- tau0
+    
+    # 构造超额变量
+    X_tau <- as.numeric(X > tau0) * (X - tau0)
+    
+    # 构造数据框用于 GLM
+    glm_data <- data.frame(
+      Y = Y,
+      X = X,
+      X_tau = X_tau,
+      Z
+    )
+    
+    # 拟合 GLM
+    formula <- as.formula(paste("Y ~ X + X_tau", if (ncol(Z) > 0) paste("+", paste(colnames(Z), collapse = " + ")) else ""))
+    
+    glm_fit <- tryCatch(
+      glm(formula, family = "binomial", data = glm_data, control = list(maxit = 25)),
+      error = function(e) { erro <<- TRUE; return(NULL) }
+    )
+    
+    if (erro) break
+    
+    mu0 <- predict(glm_fit, type = "response")
+    
+    # 计算 eta
+    I_tau <- as.numeric(X > tau0)
+    delta <- coef(glm_fit)["X_tau"]
+    
+    Un <- -mean((Y - mu0) * I_tau)
+    Jn <- delta * mean(mu0 * (1 - mu0) * I_tau)
+    
+    eta <- tryCatch({ Un / Jn }, error = function(e) { erro <<- TRUE; return(0) })
+    
+    if (erro | is.na(eta)) eta <- 0
+    
+    # 更新 tau
+    tau0 <- tau0 + eta
+    j <- j + 1
+  }
+  
+  tau_out <- if (!erro & !is.na(eta)) tau0 else NA
+  
+  return(list(tau = tau_out, iter = j - 1, converged = !erro))
+}
+```
+
+
+
+```{r}
+##########################################
+### Step4:阈值效应检验及To-SNR优化-tha ###
+##########################################
+
+# =================== 阈值检测（ghb，使用tha_scaled_trun数据） ===================
+
+alpha_level <- 0.1
+
+best_tau_ghb_tha_trun <- NA
+# best_tau_age_tha <- NA
+pval_ghb_trun <- NA
+# pval_age <- NA
+
+# 初始模型公式（无阈值项）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb"
+
+# 1️⃣ 拟合基础模型
+base_model <- glm(as.formula(initial_formula), family = binomial, data = tha_scaled_trun)
+
+# 2️⃣ 检测 ghb 阈值效应
+st_ghb <- score_test_for_threshold(
+  var_vec = tha_scaled_trun$ghb,
+  Y = tha_scaled_trun$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_ghb_trun <- st_ghb$p.value
+cat("ghb 阈值效应 p-value =", signif(pval_ghb_trun, 4), "\n")
+
+# 若显著，估计 tau 并加入模型
+if (!is.na(pval_ghb_trun) && pval_ghb_trun < alpha_level) {
+  est_ghb <- estimate_tau_by_grid(
+    var_vec = tha_scaled_trun$ghb,
+    dat_full = tha_scaled_trun,
+    base_formula = initial_formula,
+    ngrid = 100
+  )
+  best_tau_ghb_tha_trun <- est_ghb$best_tau
+  
+  # ---- 结果汇总 ----
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("ghb 阈值效应: p = %s (显著)\n", formatC(pval_ghb_trun, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 AIC 网格搜索) = %.4f\n", best_tau_ghb_tha_trun))
+  
+} else {
+  # 若不显著，也输出默认建议
+  best_tau_ghb_tha_trun <- median(tha_scaled_trun$ghb, na.rm = TRUE)
+  
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("ghb 阈值效应: p = %s (不显著)\n", formatC(pval_ghb_trun, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 中位数) = %.4f\n", best_tau_ghb_tha_trun))
+}
+
+cat("\n================ To-SNR 单阈值模型（ghb，使用tha_scaled_trun数据）===============\n")
+
+tryCatch({
+  
+  # ---- 初始化 ----
+  tau_init <- c(ghb = best_tau_ghb_tha_trun)  # 单阈值初始值
+  
+  # 🔹全局变量供 ToSNR_logistic 使用
+  # ---- 全局变量 ----
+  Y <- tha_scaled_trun$GDM
+  X <- tha_scaled_trun$ghb
+  Z_vars <- c("Age","Ethnicity","IVF","Parity","BMI","HB","MCH","MCV","FF")
+  Z <- tha_scaled_trun[, Z_vars, drop = FALSE]
+  
+  # 保证 Z 原子列
+  Z <- as.data.frame(lapply(Z, function(x) {
+    if (is.character(x)) factor(x) else x
+  }))
+  
+  # ---- 调用 To-SNR 优化 ----
+  tau_est <- ToSNR_logistic_1dim(tau_init)
+  tau_ghb <- tau_est$tau
+  best_tau_ghb_tha_trun <- tau_ghb
+  
+  # ---- 在 To-SNR 优化后构造 Age_phi ----
+  tha_scaled_trun$ghb_phi <- as.numeric(tha_scaled_trun$ghb > tau_ghb) * (tha_scaled_trun$ghb - tau_ghb)
+  
+  # ---- 拟合最终 GLM ----
+  glm_data <- data.frame(Y = Y, ghb = X, ghb_phi = tha_scaled_trun$ghb_phi, Z)
+  glm_final_tha <- glm(Y ~ ., family = "binomial", data = glm_data, control = list(maxit = 25))
+  print(summary(glm_final_tha))
+  
+  # ---- AUC 评估 ----
+  pred_joint <- predict(glm_final_tha, type = "response")
+  auc_tosnr <- pROC::auc(Y, pred_joint)
+  cat(sprintf("\nTo-SNR 模型（ghb）联合 AUC = %.4f\n", auc_tosnr))
+  
+  # ---- 输出阈值表 ----
+  tau_df_tha_ghb_trun <- data.frame(
+    Variable = names(tau_ghb),
+    Threshold = tau_ghb
+  )
+  print(tau_df_tha_ghb_trun)
+  
+}, error = function(e) {
+  cat("❌ To-SNR 模型（ghb）出错：", e$message, "\n")
+})
+
+# =================== 阈值检测（ghb2，使用tha_scaled_trun数据） ===================
+
+# 初始模型公式（包含 ghb_phi）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb + ghb_phi"
+
+# ---- 基础模型拟合 ----
+base_model <- glm(as.formula(initial_formula), family = binomial, data = tha_scaled_trun)
+
+st_ghb <- score_test_for_threshold(
+  var_vec = tha_scaled_trun$ghb,
+  Y = tha_scaled_trun$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_ghb_trun <- st_ghb$p.value
+cat("ghb 阈值效应 p-value =", signif(pval_ghb_trun, 4), "\n")
+
+# =================== 阈值检测（Age，使用tha_scaled_trun数据） ===================
+
+# ---- 检测 Age 阈值效应 ----
+st_age_simp <- score_test_for_threshold_simp(
+  var_vec = tha_scaled_trun$Age,
+  Y = tha_scaled_trun$GDM,
+  fitted_model = base_model,
+  tau = c(1.095)
+)
+pval_Age_trun <- st_age_simp$p.value
+cat("Age 阈值效应 p-value =", signif(pval_Age_trun, 4), "\n")
+best_tau_age_tha <- 1.095
+
+cat("\n================ To-SNR 单阈值模型（Age，使用tha_scaled_trun数据）===============\n")
+
+tryCatch({
+  # ---- 初始化 ----
+  tau_init <- c(Age = 1.095)
+  
+  # ---- 全局变量 ----
+  Y <- tha_scaled_trun$GDM
+  X <- tha_scaled_trun$Age
+  Z_vars <- c("ghb", "ghb_phi", "Ethnicity", "IVF", "Parity", "BMI", "HB", "MCH", "MCV", "FF")
+  Z <- tha_scaled_trun[, Z_vars, drop = FALSE]
+  
+  # 保证 Z 原子列
+  Z <- as.data.frame(lapply(Z, function(x) {
+    if (is.character(x)) factor(x) else x
+  }))
+  
+  # ---- 调用 To-SNR 优化 ----
+  tau_est <- ToSNR_logistic_1dim(tau_init)
+  tau_age <- tau_est$tau
+  best_tau_age_tha <- tau_age
+  
+  # ---- 在 To-SNR 优化后构造 Age_phi ----
+  tha_scaled_trun$Age_phi <- as.numeric(tha_scaled_trun$Age > tau_age) * (tha_scaled_trun$Age - tau_age)
+  
+  # ---- 拟合最终 GLM ----
+  glm_data <- data.frame(Y = Y, Age = X, Age_phi = tha_scaled_trun$Age_phi, Z)
+  glm_final_tha <- glm(Y ~ ., family = "binomial", data = glm_data, control = list(maxit = 25))
+  print(summary(glm_final_tha))
+  
+  # ---- AUC 评估 ----
+  pred_joint <- predict(glm_final_tha, type = "response")
+  auc_tosnr <- pROC::auc(Y, pred_joint)
+  cat(sprintf("\nTo-SNR 模型（Age）联合 AUC = %.4f\n", auc_tosnr))
+  
+  # ---- 输出阈值表 ----
+  tau_df_tha_Age_trun <- data.frame(
+    Variable = names(tau_age),
+    Threshold = tau_age
+  )
+  print(tau_df_tha_Age_trun)
+  
+}, error = function(e) {
+  cat("❌ To-SNR 模型（Age）出错：", e$message, "\n")
+})
+
+# =================== 阈值检测（Age2，使用tha_scaled_trun数据） ===================
+
+# 初始模型公式（包含 ghb_phi）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb + ghb_phi + Age_phi"
+
+# ---- 基础模型拟合 ----
+base_model <- glm(as.formula(initial_formula), family = binomial, data = tha_scaled_trun)
+
+st_age <- score_test_for_threshold(
+  var_vec = tha_scaled_trun$Age,
+  Y = tha_scaled_trun$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_Age_trun <- st_age$p.value
+cat("Age 阈值效应 p-value =", signif(pval_Age_trun, 4), "\n")
+```
+
+
+
+```{r}
+###########################################
+### Step4:阈值效应检验及To-SNR优化-norm ###
+###########################################
+
+# =================== 阈值检测（ghb，使用norm数据） ===================
+
+alpha_level <- 0.1
+
+best_tau_ghb_norm <- NA
+# best_tau_age_norm <- NA
+pval_ghb <- NA
+# pval_age <- NA
+
+# 初始模型公式（无阈值项）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb"
+
+# 1️⃣ 拟合基础模型
+base_model <- glm(as.formula(initial_formula), family = binomial, data = norm)
+
+# 2️⃣ 检测 ghb 阈值效应
+st_ghb <- score_test_for_threshold(
+  var_vec = norm$ghb,
+  Y = norm$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_ghb <- st_ghb$p.value
+cat("ghb 阈值效应 p-value =", signif(pval_ghb, 4), "\n")
+
+# 若显著，估计 tau 并加入模型
+if (!is.na(pval_ghb) && pval_ghb < alpha_level) {
+  est_ghb <- estimate_tau_by_grid(
+    var_vec = norm$ghb,
+    dat_full = norm,
+    base_formula = initial_formula,
+    ngrid = 100
+  )
+  best_tau_ghb_norm <- est_ghb$best_tau
+  
+  # ---- 结果汇总 ----
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("ghb 阈值效应: p = %s (显著)\n", formatC(pval_ghb, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 AIC 网格搜索) = %.4f\n", best_tau_ghb_norm))
+  
+} else {
+  # 若不显著，也输出默认建议
+  best_tau_ghb_norm <- median(tha_scaled$ghb, na.rm = TRUE)
+  
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("Age 阈值效应: p = %s (不显著)\n", formatC(pval_age, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 中位数) = %.4f\n", best_tau_ghb_norm))
+}
+
+cat("\n================ To-SNR 单阈值模型（ghb，使用norm数据）===============\n")
+
+tryCatch({
+  
+  # ---- 初始化 ----
+  tau_init <- c(ghb = best_tau_ghb_norm)  # 单阈值初始值
+  
+  # 🔹全局变量供 ToSNR_logistic 使用
+  # ---- 全局变量 ----
+  Y <- norm$GDM
+  X <- norm$ghb
+  Z_vars <- c("Age","Ethnicity","IVF","Parity","BMI","HB","MCH","MCV","FF")
+  Z <- norm[, Z_vars, drop = FALSE]
+  
+  # 保证 Z 原子列
+  Z <- as.data.frame(lapply(Z, function(x) {
+    if (is.character(x)) factor(x) else x
+  }))
+  
+  # ---- 调用 To-SNR 优化 ----
+  tau_est <- ToSNR_logistic_1dim(tau_init)
+  tau_ghb <- tau_est$tau
+  best_tau_ghb_norm <- tau_ghb
+  
+  # ---- 在 To-SNR 优化后构造 ghb_phi ----
+  norm$ghb_phi <- as.numeric(norm$ghb > tau_ghb) * (norm$ghb - tau_ghb)
+  
+  # ---- 拟合最终 GLM ----
+  glm_data <- data.frame(Y = Y, ghb = X, ghb_phi = norm$ghb_phi, Z)
+  glm_final_norm <- glm(Y ~ ., family = "binomial", data = glm_data, control = list(maxit = 25))
+  print(summary(glm_final_norm))
+  
+  # ---- AUC 评估 ----
+  pred_joint <- predict(glm_final_norm, type = "response")
+  auc_tosnr <- pROC::auc(Y, pred_joint)
+  cat(sprintf("\nTo-SNR 模型（ghb）联合 AUC = %.4f\n", auc_tosnr))
+  
+  # ---- 输出阈值表 ----
+  tau_df_norm_ghb <- data.frame(
+    Variable = names(tau_ghb),
+    Threshold = tau_ghb
+  )
+  print(tau_df_norm_ghb)
+  
+}, error = function(e) {
+  cat("❌ To-SNR 模型（ghb）出错：", e$message, "\n")
+})
+
+# =================== 阈值检测（ghb2，使用norm数据） ===================
+
+# 初始模型公式（包含 ghb_phi）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb + ghb_phi"
+
+# ---- 基础模型拟合 ----
+base_model <- glm(as.formula(initial_formula), family = binomial, data = norm)
+
+st_ghb <- score_test_for_threshold(
+  var_vec = norm$ghb,
+  Y = norm$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_ghb <- st_ghb$p.value
+cat("ghb 阈值效应 p-value =", signif(pval_ghb, 4), "\n")
+
+# =================== 阈值检测（Age，使用 norm 数据） ===================
+
+alpha_level <- 0.1
+
+# best_tau_ghb_norm <- NA   # 保留原变量名（方便后续兼容）
+best_tau_age_norm <- NA
+# pval_ghb <- NA
+pval_age <- NA
+
+# 初始模型公式（包含 ghb_phi）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb + ghb_phi"
+
+# ---- 基础模型拟合 ----
+base_model <- glm(as.formula(initial_formula), family = binomial, data = norm)
+
+# ---- 检测 Age 阈值效应 ----
+st_age <- score_test_for_threshold(
+  var_vec = norm$Age,
+  Y = norm$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_age <- st_age$p.value
+cat("Age 阈值效应 p-value =", signif(pval_age, 4), "\n")
+
+# 若显著，则估计 tau 并更新模型
+if (!is.na(pval_age) && pval_age < alpha_level) {
+  est_age <- estimate_tau_by_grid(
+    var_vec = norm$Age,
+    dat_full = norm,
+    base_formula = initial_formula,
+    ngrid = 100
+  )
+  best_tau_age_norm <- est_age$best_tau
+  
+  # ---- 结果汇总 ----
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("Age 阈值效应: p = %s (显著)\n", formatC(pval_age, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 AIC 网格搜索) = %.4f\n", best_tau_age_norm))
+  
+} else {
+  # 若不显著，也输出默认建议
+  best_tau_age_norm <- median(norm$Age, na.rm = TRUE)
+  
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("Age 阈值效应: p = %s (不显著)\n", formatC(pval_age, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 AIC 网格搜索) = %.4f\n", best_tau_age_norm))
+}
+
+cat("\n================ To-SNR 单阈值模型（Age）===============\n")
+
+tryCatch({
+  # ---- 初始化 ----
+  tau_init <- c(Age = 0.164)
+  
+  # ---- 全局变量 ----
+  Y <- norm$GDM
+  X <- norm$Age
+  Z_vars <- c("ghb", "ghb_phi", "Ethnicity", "IVF", "Parity", "BMI", "HB", "MCH", "MCV", "FF")
+  Z <- norm[, Z_vars, drop = FALSE]
+  
+  # 保证 Z 原子列
+  Z <- as.data.frame(lapply(Z, function(x) {
+    if (is.character(x)) factor(x) else x
+  }))
+  
+  # ---- 调用 To-SNR 优化 ----
+  tau_est <- ToSNR_logistic_1dim(tau_init)
+  tau_age <- tau_est$tau
+  best_tau_age_norm <- tau_age
+  
+  # ---- 在 To-SNR 优化后构造 Age_phi ----
+  norm$Age_phi <- as.numeric(norm$Age > tau_age) * (norm$Age - tau_age)
+  
+  # ---- 拟合最终 GLM ----
+  glm_data <- data.frame(Y = Y, Age = X, Age_phi = norm$Age_phi, Z)
+  glm_final_norm <- glm(Y ~ ., family = "binomial", data = glm_data, control = list(maxit = 25))
+  print(summary(glm_final_norm))
+  
+  # ---- AUC 评估 ----
+  pred_joint <- predict(glm_final_norm, type = "response")
+  auc_tosnr <- pROC::auc(Y, pred_joint)
+  cat(sprintf("\nTo-SNR 模型（Age）联合 AUC = %.4f\n", auc_tosnr))
+  
+  # ---- 输出阈值表 ----
+  tau_df_norm_Age <- data.frame(
+    Variable = names(tau_age),
+    Threshold = tau_age
+  )
+  print(tau_df_norm_Age)
+  
+}, error = function(e) {
+  cat("❌ To-SNR 模型（Age）出错：", e$message, "\n")
+})
+
+# =================== 阈值检测（Age2，使用norm数据） ===================
+
+# 初始模型公式（包含 ghb_phi）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb + ghb_phi + Age_phi"
+
+# ---- 基础模型拟合 ----
+base_model <- glm(as.formula(initial_formula), family = binomial, data = norm)
+
+st_age <- score_test_for_threshold(
+  var_vec = norm$Age,
+  Y = norm$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_age <- st_age$p.value
+cat("Age 阈值效应 p-value =", signif(pval_age, 4), "\n")
+```
+
+
+
+```{r}
+##############################
+### Step5:构建迁移学习矩阵 ###
+##############################
+
+build_H_matrix_2 <- function(data) {
+  # ---- 提取数值变量 ----
+  ghb <- data$ghb
+  Age <- data$Age
+  HB <- data$HB
+  MCH <- data$MCH
+  MCV <- data$MCV
+  FF <- data$FF
+  ghb_phi <- data$ghb_phi
+  Age_phi <- data$Age_phi
+  
+  n <- nrow(data)
+  
+  # ---- 分类变量 ----
+  cat_vars <- c("Ethnicity", "IVF", "Parity", "BMI")
+  Z_cat <- data[, cat_vars, drop = FALSE]
+  
+  # 统一为 factor
+  Z_cat <- as.data.frame(lapply(Z_cat, function(x) {
+    if (is.character(x)) factor(x) else x
+  }))
+  
+  # ---- 数值协变量矩阵 ----
+  Z_num <- data.frame(HB = HB, MCH = MCH, MCV = MCV, FF = FF)
+  
+  # ---- 关键修改：让 intercept 与行数一致 ----
+  # intercept <- rep(1, n)
+  
+  # ---- 整合设计矩阵 ----
+  H <- data.frame(
+    # intercept = intercept,
+    ghb = ghb,
+    ghb_phi = ghb_phi,
+    Age = Age,
+    Age_phi = Age_phi,
+    Z_num,
+    Z_cat
+  )
+  
+  # ---- 自动生成哑变量矩阵 ----
+  H_mat <- model.matrix(~ . - 1, data = H)  # 保留 intercept 列
+  
+  return(H_mat)
+}
+
+# 构造矩阵
+X_target_2 <- build_H_matrix_2(tha_scaled_trun)
+X_source_2 <- build_H_matrix_2(norm)
+
+X_target_2 <- X_target_2[, colnames(X_target_2) != "Ethnicity0"]
+X_source_2 <- X_source_2[, colnames(X_source_2) != "Ethnicity0"]
+
+# 响应变量
+y_target_2 <- tha_scaled_trun$GDM
+y_source_2 <- norm$GDM
+```
+
+
+
+```{r}
+################################
+### Step6:源数据可迁移性检验 ###
+################################
+
+Trans_check_single_source <- function(
+    X_target, y_target,
+    X_source, y_source,
+    C0 = 2,                # 判别阈值系数，可调
+    lambda_lasso = 0.0001,  # Lasso 惩罚
+    seed = 123
+) {
+  library(glmnet)
+  set.seed(seed)
+  
+  n <- nrow(X_target)
+  folds <- sample(rep(1:3, length.out = n))   # 随机分三折
+  
+  # --- 容器 ---
+  L0_hat_k <- numeric(3)   # 带源
+  L0_hat_0 <- numeric(3)   # 仅目标
+  
+  # --- 三折循环 ---
+  for (r in 1:3) {
+    idx_val <- which(folds == r)
+    idx_train <- setdiff(1:n, idx_val)
+    
+    X_train <- X_target[idx_train, , drop = FALSE]
+    y_train <- y_target[idx_train]
+    X_val   <- X_target[idx_val, , drop = FALSE]
+    y_val   <- y_target[idx_val]
+    
+    # (2) 仅目标 Lasso
+    fit0 <- glmnet(
+      x = X_train,
+      y = y_train,
+      family = "binomial",
+      alpha = 1,
+      lambda = lambda_lasso,
+      standardize = FALSE
+    )
+    beta0 <- as.matrix(coef(fit0, s = lambda_lasso))
+    eta0 <- as.vector(cbind(1, X_val) %*% beta0)
+    mu0 <- 1 / (1 + exp(-eta0))
+    L0_hat_0[r] <- -mean(y_val * log(mu0 + 1e-8) + (1 - y_val) * log(1 - mu0 + 1e-8))
+    
+    # (3) 目标 + 源 Lasso
+    X_train_mix <- rbind(X_train, X_source)
+    y_train_mix <- c(y_train, y_source)
+    fitk <- glmnet(
+      x = X_train_mix,
+      y = y_train_mix,
+      family = "binomial",
+      alpha = 1,
+      lambda = lambda_lasso,
+      standardize = FALSE
+    )
+    betak <- as.matrix(coef(fitk, s = lambda_lasso))
+    eta1 <- as.vector(cbind(1, X_val) %*% betak)
+    mu1 <- 1 / (1 + exp(-eta1))
+    L0_hat_k[r] <- -mean(y_val * log(mu1 + 1e-8) + (1 - y_val) * log(1 - mu1 + 1e-8))
+  }
+  
+  # (4) 计算整体指标
+  L0_k_bar <- mean(L0_hat_k)
+  L0_0_bar <- mean(L0_hat_0)
+  sigma_hat <- sqrt(sum((L0_hat_k - L0_hat_0)^2) / 2)
+  criterion <- C0 * max(sigma_hat, 0.01)
+  diff_val <- L0_k_bar - L0_0_bar
+  is_good <- (diff_val <= criterion)
+  
+  # --- 输出 ---
+  cat("===== 单源 Trans-GLM 检测结果 =====\n")
+  cat("L0_hat^(1) =", round(L0_k_bar, 5), "\n")
+  cat("L0_hat^(0) =", round(L0_0_bar, 5), "\n")
+  cat("Diff =", round(diff_val, 5), "\n")
+  cat("σ̂ =", round(sigma_hat, 5), "\n")
+  cat("C0*(σ̂∨0.01) =", round(criterion, 5), "\n")
+  cat("可迁移好源?:", ifelse(is_good, "✅ 是", "❌ 否"), "\n")
+  
+  return(list(
+    L0_hat_1 = L0_k_bar,
+    L0_hat_0 = L0_0_bar,
+    sigma_hat = sigma_hat,
+    diff = diff_val,
+    criterion = criterion,
+    is_good_source = is_good
+  ))
+}
+
+result2_check <- Trans_check_single_source(
+  X_target = X_target_2,
+  y_target = y_target_2,
+  X_source = X_source_2,
+  y_source = y_source_2,
+  C0 = 2,
+  lambda_lasso = 0.0001
+)
+```
+
+
+
+```{r}
+##############################
+### Step5:迁移学习得到系数 ###
+##############################
+
+A_Trans_logistic <- function(
+    X_target, y_target,
+    X_source, y_source,
+    A = NULL,
+    lambda_w = 0.0001,
+    lambda_s = 0.01,
+    max_iter = 1000,
+    tol = 1e-6
+) {
+  # ================================================================
+  # Step 0. 基本准备
+  # ================================================================
+  if (is.null(A)) A <- 1
+  
+  n0 <- nrow(X_target)
+  nk <- nrow(X_source)
+  p <- ncol(X_target)
+  
+  # 确保列名存在
+  if (is.null(colnames(X_target))) {
+    colnames(X_target) <- paste0("V", 1:p)
+  }
+  if (is.null(colnames(X_source))) {
+    colnames(X_source) <- colnames(X_target)
+  }
+  
+  # ================================================================
+  # Step 1. Transferring step
+  # ================================================================
+  library(glmnet)
+  
+  X_tar_sour <- rbind(X_target, X_source)
+  y_tar_sour <- c(y_target, y_source)
+  
+  fit_w <- glmnet(
+    x = X_tar_sour,
+    y = y_tar_sour,
+    family = "binomial",
+    alpha = 1,
+    lambda = lambda_w,
+    standardize = FALSE,
+    maxit = max_iter
+  )
+  
+  coef_w <- as.matrix(coef(fit_w, s = lambda_w))
+  coef_names <- rownames(coef_w)
+  intercept_w <- coef_w[1, 1]
+  w_hat_A <- coef_w[-1, 1]
+  names(w_hat_A) <- coef_names[-1]
+  
+  # ================================================================
+  # Step 2. Debiasing step
+  # ================================================================
+  fit_delta <- glmnet(
+    x = X_target,
+    y = y_target,
+    family = "binomial",
+    alpha = 1,
+    lambda = lambda_s,
+    offset = as.vector(X_target %*% w_hat_A + intercept_w),
+    standardize = FALSE,
+    maxit = max_iter
+  )
+  
+  coef_delta <- as.matrix(coef(fit_delta, s = lambda_s))
+  intercept_delta <- coef_delta[1, 1]
+  delta_hat_A <- coef_delta[-1, 1]
+  names(delta_hat_A) <- coef_names[-1]
+  
+  # ================================================================
+  # Step 3. 合并参数
+  # ================================================================
+  beta_hat <- w_hat_A + delta_hat_A
+  intercept_beta <- intercept_w + intercept_delta
+  
+  # 生成结果表格
+  coef_table <- data.frame(
+    Variable = names(beta_hat),
+    w_hat = round(w_hat_A, 6),
+    delta_hat = round(delta_hat_A, 6),
+    beta_hat = round(beta_hat, 6)
+  )
+  
+  # ================================================================
+  # Step 4. 输出结果
+  # ================================================================
+  result <- list(
+    intercepts = list(
+      intercept_w = intercept_w,
+      intercept_delta = intercept_delta,
+      intercept_beta = intercept_beta
+    ),
+    coef_table = coef_table,
+    w_hat = w_hat_A,
+    delta_hat = delta_hat_A,
+    beta_hat = beta_hat,
+    lambda_w = lambda_w,
+    lambda_s = lambda_s
+  )
+  
+  return(result)
+}
+
+result2 <- A_Trans_logistic(
+  X_target_2, y_target_2,
+  X_source_2, y_source_2,
+  A = NULL,            # transferring set, 若设为 NULL 则默认使用所有源域
+  lambda_w = 0.0001,     # transferring step 的 L1 正则参数
+  lambda_s = 0.001,     # debiasing step 的 L1 正则参数
+  max_iter = 1000,
+  tol = 1e-6
+)
+
+result3 <- A_Trans_logistic(
+  X_target_2, y_target_2,
+  X_source_2, y_source_2,
+  A = NULL,            # transferring set, 若设为 NULL 则默认使用所有源域
+  lambda_w = 0.0001,     # transferring step 的 L1 正则参数
+  lambda_s = 0.002,     # debiasing step 的 L1 正则参数
+  max_iter = 1000,
+  tol = 1e-6
+)
+```
+
+
+
+```{r}
+###########################################
+### Step5:计算迁移学习系数置信区间-pool ###
+###########################################
+
+C_Trans_CI_logistic <- function(
+    X_target, y_target,
+    X_source, y_source,
+    result_trans,
+    alpha = 0.05
+) {
+  # ============================
+  # Step 0: 基本检查与参数
+  # ============================
+  if (is.null(result_trans) || is.null(result_trans$beta_hat)) {
+    stop("参数 result_trans 必须提供，且包含 result_trans$beta_hat（无惩罚迁移估计量）。")
+  }
+  n0 <- nrow(X_target); ns <- nrow(X_source)
+  N <- n0 + ns
+  p <- ncol(X_target)
+  if (is.null(colnames(X_target))) colnames(X_target) <- paste0("V", seq_len(p))
+  coln <- colnames(X_target)
+  
+  # 最终估计量（无需再次纠偏，直接使用 Step 3 的结果）
+  beta_hat <- as.numeric(result_trans$beta_hat)
+  # 添加截距项，用于构建 X_pool
+  intercept_beta <- as.numeric(result_trans$intercepts$intercept_beta)
+  names(beta_hat) <- coln
+  
+  # 构造包含截距的池化设计矩阵 X* 和响应变量 Y
+  X_pool <- rbind(X_target, X_source)
+  X_pool_star <- cbind(Intercept = 1, X_pool)
+  y_pool <- c(y_target, y_source)
+  
+  # ============================
+  # Step 1: 计算三明治估计量的“面包” A 和“肉馅” B
+  # A = I_pool = X^T W X (Fisher Information)
+  # B = t(U) %*% U (Score Variance)
+  # ============================
+  
+  # 1. 计算线性预测器（包含截距）
+  eta_pool <- as.numeric(X_pool_star %*% c(intercept_beta, beta_hat))
+  
+  # 2. 计算权重向量 W_vec = mu * (1 - mu) 和残差向量
+  mu_pool <- 1 / (1 + exp(-eta_pool))
+  W_pool_vec <- pmax(as.vector(mu_pool * (1 - mu_pool)), 1e-8) # 数值稳定
+  resid_pool <- as.vector(y_pool - mu_pool)
+  
+  # 3. 计算“面包”项 A (Fisher Information)
+  W_pool <- diag(W_pool_vec)
+  A_mat <- t(X_pool_star) %*% W_pool %*% X_pool_star
+  A_mat <- (A_mat + t(A_mat)) / 2 # 对称保护
+  
+  # 4. 计算“肉馅”项 B (Score Variance)
+  # U 是 Score Function 对单个观测值的贡献: U_i = x_i * (y_i - mu_i)
+  U_mat <- X_pool_star * resid_pool # n x (p+1) matrix
+  B_mat <- t(U_mat) %*% U_mat
+  B_mat <- (B_mat + t(B_mat)) / 2 # 对称保护
+  
+  # ============================
+  # Step 2: 计算稳健协方差矩阵 V_sandwich
+  # V_sandwich = A^(-1) * B * A^(-1)
+  # ============================
+  
+  # 增加 Tikhonov 正则化（Ridge），增强求逆的稳定性
+  ridge_term <- diag(1e-12, p + 1)
+  
+  # 计算 A_mat 的逆 (Bread_inv)
+  Bread_inv <- tryCatch(
+    solve(A_mat + ridge_term),
+    error = function(e) MASS::ginv(A_mat) # 如果标准求逆失败，使用广义逆
+  )
+  
+  # 构造三明治 V_sandwich
+  V_mat_full <- Bread_inv %*% B_mat %*% Bread_inv
+  V_mat_full <- (V_mat_full + t(V_mat_full)) / 2 # 确保最终矩阵对称
+  
+  # ============================
+  # Step 3: 提取参数方差和标准误
+  # ============================
+  # 截距项的方差是 V_mat_full[1, 1]
+  # 系数项的方差是 V_mat_full[-1, -1]
+  var_j_full <- diag(V_mat_full)
+  # 数值保护：确保方差非负
+  var_j_full[var_j_full < 0] <- 0
+  
+  var_j <- var_j_full[-1] # 仅协变量的方差
+  var_intercept <- var_j_full[1]
+  
+  se_j <- sqrt(var_j)
+  se_intercept <- sqrt(var_intercept)
+  
+  # ============================
+  # Step 4: 构造置信区间
+  # ============================
+  z_q <- qnorm(1 - alpha / 2)
+  
+  CI_lower <- beta_hat - z_q * se_j
+  CI_upper <- beta_hat + z_q * se_j
+  
+  # 截距的 CI
+  CI_lower_int <- intercept_beta - z_q * se_intercept
+  CI_upper_int <- intercept_beta + z_q * se_intercept
+  
+  # 整合结果
+  ci_table_coef <- data.frame(
+    Variable = coln,
+    Estimate = beta_hat,
+    var_j = var_j,
+    SE = se_j,
+    CI_lower = CI_lower,
+    CI_upper = CI_upper,
+    stringsAsFactors = FALSE
+  )
+  
+  ci_table_int <- data.frame(
+    Variable = "(Intercept)",
+    Estimate = intercept_beta,
+    var_j = var_intercept,
+    SE = se_intercept,
+    CI_lower = CI_lower_int,
+    CI_upper = CI_upper_int,
+    stringsAsFactors = FALSE
+  )
+  
+  result <- list(
+    ci_table = rbind(ci_table_int, ci_table_coef),
+    V_mat_full = V_mat_full,
+    beta_hat = beta_hat,
+    intercept_beta = intercept_beta
+  )
+  
+  return(result)
+}
+
+result2_CI_C <- C_Trans_CI_logistic(
+  X_target_2, y_target_2,
+  X_source_2, y_source_2,
+  result2,            # 必须：Algorithm1 的输出（包含 result_trans$beta_hat）
+  alpha = 0.05
+)
+
+result3_CI_C <- C_Trans_CI_logistic(
+  X_target_2, y_target_2,
+  X_source_2, y_source_2,
+  result3,            # 必须：Algorithm1 的输出（包含 result_trans$beta_hat）
+  alpha = 0.05
+)
+```
+
+
+
+```{r}
+#############################################
+### Step5:计算迁移学习系数置信区间-target ###
+#############################################
+
+library(MASS) 
+
+D_Trans_CI_logistic <- function(
+    X_target, y_target,
+    X_source, y_source, # 虽然传入了，但在本函数内仅用于提取 beta_hat
+    result_trans,
+    alpha = 0.05
+) {
+  # ============================
+  # Step 0: 基本检查与参数 (与 C 方案相同)
+  # ============================
+  if (is.null(result_trans) || is.null(result_trans$beta_hat)) {
+    stop("参数 result_trans 必须提供，且包含 result_trans$beta_hat（无惩罚迁移估计量）。")
+  }
+  n0 <- nrow(X_target) # 目标域样本量
+  p <- ncol(X_target)
+  if (is.null(colnames(X_target))) colnames(X_target) <- paste0("V", seq_len(p))
+  coln <- colnames(X_target)
+  
+  # 最终估计量（来自 Pool-Debias 过程的最终结果）
+  beta_hat <- as.numeric(result_trans$beta_hat)
+  intercept_beta <- as.numeric(result_trans$intercepts$intercept_beta)
+  names(beta_hat) <- coln
+  
+  # 构造包含截距的【目标域】设计矩阵 X* 和响应变量 Y
+  # 注意：这里只使用 Target 数据，与 C 方案的关键区别
+  X_target_star <- cbind(Intercept = 1, X_target)
+  
+  # ============================
+  # Step 1: 计算三明治估计量的“面包” A_T 和“肉馅” B_T (仅目标数据)
+  # A_T = I_target = X_target^T W_target X_target
+  # B_T = t(U_target) %*% U_target
+  # ============================
+  
+  # 1. 计算线性预测器（使用最终估计量 beta_hat 在目标数据上）
+  eta_target <- as.numeric(X_target_star %*% c(intercept_beta, beta_hat))
+  
+  # 2. 计算权重向量 W_vec = mu * (1 - mu) 和残差向量
+  mu_target <- 1 / (1 + exp(-eta_target))
+  W_target_vec <- pmax(as.vector(mu_target * (1 - mu_target)), 1e-8) # 数值稳定
+  resid_target <- as.vector(y_target - mu_target)
+  
+  # 3. 计算“面包”项 A_T (Target Fisher Information)
+  W_target <- diag(W_target_vec)
+  A_mat <- t(X_target_star) %*% W_target %*% X_target_star
+  A_mat <- (A_mat + t(A_mat)) / 2 # 对称保护
+  
+  # 4. 计算“肉馅”项 B_T (Target Score Variance)
+  # U_i = x_i * (y_i - mu_i)
+  U_mat <- X_target_star * resid_target # n0 x (p+1) matrix
+  B_mat <- t(U_mat) %*% U_mat
+  B_mat <- (B_mat + t(B_mat)) / 2 # 对称保护
+  
+  # ============================
+  # Step 2: 计算稳健协方差矩阵 V_sandwich
+  # V_sandwich = A_T^(-1) * B_T * A_T^(-1)
+  # ============================
+  
+  # 增加 Tikhonov 正则化（Ridge），增强求逆的稳定性
+  ridge_term <- diag(1e-12, p + 1)
+  
+  # 计算 A_mat 的逆 (Bread_inv)
+  Bread_inv <- tryCatch(
+    solve(A_mat + ridge_term),
+    error = function(e) MASS::ginv(A_mat) # 如果标准求逆失败，使用广义逆
+  )
+  
+  # 构造三明治 V_sandwich
+  V_mat_full <- Bread_inv %*% B_mat %*% Bread_inv
+  V_mat_full <- (V_mat_full + t(V_mat_full)) / 2 # 确保最终矩阵对称
+  
+  # ============================
+  # Step 3: 提取参数方差和标准误 (与 C 方案相同)
+  # ============================
+  var_j_full <- diag(V_mat_full)
+  var_j_full[var_j_full < 0] <- 0
+  
+  var_j <- var_j_full[-1] # 仅协变量的方差
+  var_intercept <- var_j_full[1]
+  
+  se_j <- sqrt(var_j)
+  se_intercept <- sqrt(var_intercept)
+  
+  # ============================
+  # Step 4: 构造置信区间 (与 C 方案相同)
+  # ============================
+  z_q <- qnorm(1 - alpha / 2)
+  
+  CI_lower <- beta_hat - z_q * se_j
+  CI_upper <- beta_hat + z_q * se_j
+  
+  # 截距的 CI
+  CI_lower_int <- intercept_beta - z_q * se_intercept
+  CI_upper_int <- intercept_beta + z_q * se_intercept
+  
+  # 整合结果
+  ci_table_coef <- data.frame(
+    Variable = coln,
+    Estimate = beta_hat,
+    var_j = var_j,
+    SE = se_j,
+    CI_lower = CI_lower,
+    CI_upper = CI_upper,
+    stringsAsFactors = FALSE
+  )
+  
+  ci_table_int <- data.frame(
+    Variable = "(Intercept)",
+    Estimate = intercept_beta,
+    var_j = var_intercept,
+    SE = se_intercept,
+    CI_lower = CI_lower_int,
+    CI_upper = CI_upper_int,
+    stringsAsFactors = FALSE
+  )
+  
+  result <- list(
+    ci_table = rbind(ci_table_int, ci_table_coef),
+    V_mat_full = V_mat_full,
+    beta_hat = beta_hat,
+    intercept_beta = intercept_beta
+  )
+  
+  return(result)
+}
+
+# 示例调用 (假设数据已加载)
+result2_CI_D <- D_Trans_CI_logistic(
+  X_target_2, y_target_2,
+  X_source_2, y_source_2,
+  result2,
+  alpha = 0.05
+)
+
+result3_CI_D <- D_Trans_CI_logistic(
+  X_target_2, y_target_2,
+  X_source_2, y_source_2,
+  result3,
+  alpha = 0.05
+)
+```
+
+
+
+```{r}
+##############################
+### Step6:置信区间计算-GLM ###
+##############################
+
+# 拟合逻辑回归
+glm_target <- glm(GDM ~ ., family = binomial(), data = tha_scaled_trun)
+
+# 提取结果
+glm_summary_target <- summary(glm_target)$coefficients
+# 提取系数、标准误
+coef_est <- coef(glm_target)
+se_est   <- summary(glm_target)$coefficients[, "Std. Error"]
+
+# 计算 95% CI
+z_q <- qnorm(0.975)
+CI_lower <- coef_est - z_q * se_est
+CI_upper <- coef_est + z_q * se_est
+
+# 构造数据框，与 trans_CI_df 对齐
+glm_CI_df <- data.frame(
+  Variable = names(coef_est),
+  CI_lower_GLM = CI_lower,
+  CI_upper_GLM = CI_upper,
+  row.names = NULL,
+  stringsAsFactors = FALSE
+)
+```
+
+
+
+```{r}
+################################
+### Step6:置信区间计算-Trans ###
+################################
+
+library(dplyr)
+
+select_CI <- function(result, result_CI_C, result_CI_D) {
+  
+  # 1. 提取用于判断的 delta_hat/delta 列
+  intercept_delta <- as.numeric(result$intercepts$intercept_delta)
+  covariate_delta <- as.numeric(result$delta_hat)
+  
+  # 2. 构造 delta 数据框
+  p <- length(covariate_delta)
+  if (p != (nrow(result_CI_C$ci_table) - 1)) {
+    stop("result$delta_hat 的长度与系数数量不匹配。")
+  }
+  
+  delta_df <- data.frame(
+    Variable = result_CI_C$ci_table$Variable,
+    delta_val = c(
+      intercept_delta,
+      covariate_delta
+    ),
+    stringsAsFactors = FALSE
+  )
+  
+  # 3. 合并所有 CI 数据 (注意这里使用了 dplyr::select)
+  merged_df <- delta_df %>%
+    dplyr::left_join(
+      result_CI_C$ci_table %>% 
+        # 强制使用 dplyr::select，解决冲突
+        dplyr::select(Variable, CI_lower_C = CI_lower, CI_upper_C = CI_upper),
+      by = "Variable"
+    ) %>%
+    dplyr::left_join(
+      result_CI_D$ci_table %>% 
+        # 强制使用 dplyr::select，解决冲突
+        dplyr::select(Variable, CI_lower_D = CI_lower, CI_upper_D = CI_upper),
+      by = "Variable"
+    )
+  
+  # 4. 应用逻辑选择 CI
+  trans_CI_df <- merged_df %>%
+    dplyr::mutate(
+      CI_lower_Trans = ifelse(abs(delta_val) < 1e-6, CI_lower_C, CI_lower_D),
+      CI_upper_Trans = ifelse(abs(delta_val) < 1e-6, CI_upper_C, CI_upper_D)
+    ) %>%
+    dplyr::select(Variable, CI_lower_Trans, CI_upper_Trans)
+    
+  return(trans_CI_df)
+}
+
+trans_CI_df_2 <- select_CI(
+  result = result2, 
+  result_CI_C = result2_CI_C, 
+  result_CI_D = result2_CI_D)
+
+trans_CI_df_3 <- select_CI(
+  result = result3, 
+  result_CI_C = result3_CI_C, 
+  result_CI_D = result3_CI_D)
+```
+
+
+
+```{r}
+##########################
+### Step7:置信区间对比 ###
+##########################
+
+compare_CI <- merge(glm_CI_df, trans_CI_df_3, by = "Variable", all = TRUE)
+
+# 计算区间长度与缩短比例
+compare_CI$CI_len_GLM <- compare_CI$CI_upper_GLM - compare_CI$CI_lower_GLM
+compare_CI$CI_len_Trans <- compare_CI$CI_upper_Trans - compare_CI$CI_lower_Trans
+compare_CI$Shrink_Ratio <- compare_CI$CI_len_Trans / compare_CI$CI_len_GLM
+
+compare_CI <- compare_CI[order(compare_CI$Variable), ]
+print(compare_CI, digits = 4)
+
+cat("\n平均置信区间缩短比例:",
+    round(mean(compare_CI$Shrink_Ratio, na.rm = TRUE), 4), "\n")
+
+library(ggplot2)
+library(forcats)
+
+plot_data <- compare_CI %>%
+  filter(Variable != "(Intercept)") %>%
+  # 添加一个分类列，指示是缩短（<1）还是拉长（>1）
+  mutate(
+    Ratio_Category = ifelse(Shrink_Ratio < 1, "CI Shrinks (Better)", "CI Lengthens (Worse)"),
+    # 对变量进行因子排序，按 Shrink Ratio 升序排列
+    Variable = forcats::fct_reorder(Variable, Shrink_Ratio)
+  )
+
+p_shrink_ratio <- ggplot(plot_data, aes(x = Variable, y = Shrink_Ratio, fill = Ratio_Category)) +
+  
+  # 绘制条形图
+  geom_bar(stat = "identity", width = 0.7) +
+  
+  # 添加参考线 y=1，这是 GLM 和 Trans CI 长度相等的分界线
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", size = 0.5) +
+  
+  # 添加文字标签，显示具体的缩短比例
+  geom_text(aes(label = round(Shrink_Ratio, 2)), 
+            vjust = -0.5, size = 3, color = "grey30") +
+  
+  # 设置填充颜色
+  scale_fill_manual(values = c("CI Shrinks (Better)" = "#28a745", # 绿色
+                               "CI Lengthens (Worse)" = "#dc3545")) + # 红色
+  
+  # 坐标轴和标题设置
+  labs(
+    title = "Confidence Interval Shrinkage Ratio by Variable",
+    subtitle = "Ratio = Trans CI Length / GLM CI Length (Ratio < 1 indicates improvement)",
+    x = "Variable",
+    y = "Shrinkage Ratio (Trans/GLM)",
+    fill = "CI Length Change" # 图例标题
+  ) +
+  
+  # 调整主题
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_shrink_ratio)
+```
+
+
+
+```{r}
+################################
+### Step7:置信区间可视化对比 ###
+################################
+
+select_SE <- function(result, result_CI_C, result_CI_D) {
+  
+  # 1. 提取用于判断的 delta_hat/delta 列
+  intercept_delta <- as.numeric(result$intercepts$intercept_delta)
+  covariate_delta <- as.numeric(result$delta_hat)
+  
+  # 2. 构造 delta 数据框
+  p <- length(covariate_delta)
+  if (p != (nrow(result_CI_C$ci_table) - 1)) {
+    stop("result$delta_hat 的长度与系数数量不匹配。")
+  }
+  
+  delta_df <- data.frame(
+    Variable = result_CI_C$ci_table$Variable,
+    delta_val = c(
+      intercept_delta,
+      covariate_delta
+    ),
+    stringsAsFactors = FALSE
+  )
+  
+  # 3. 合并所有 SE 数据
+  merged_df <- delta_df %>%
+    dplyr::left_join(
+      result_CI_C$ci_table %>% dplyr::select(Variable, SE_C = SE),
+      by = "Variable"
+    ) %>%
+    dplyr::left_join(
+      result_CI_D$ci_table %>% dplyr::select(Variable, SE_D = SE),
+      by = "Variable"
+    )
+  
+  # 4. 应用逻辑选择最终 SE
+  final_SE_df <- merged_df %>%
+    dplyr::mutate(
+      # 如果 delta_val 接近于 0，使用 C 方案的 SE (SE_C)
+      # 否则使用 D 方案的 SE (SE_D)
+      SE_final = ifelse(abs(delta_val) < 1e-6, SE_C, SE_D)
+    ) %>%
+    dplyr::select(Variable, SE_final)
+    
+  return(final_SE_df)
+}
+
+final_SE_df_2 <- select_SE(result = result2, 
+                         result_CI_C = result2_CI_C, 
+                         result_CI_D = result2_CI_D)
+
+# 从 result2_CI_C 中获取 Variable 列表和顺序作为参考
+variable_names <- result2_CI_C$ci_table$Variable
+
+# 提取并合并所有 Estimate 值
+intercept_estimate <- as.numeric(result2$intercepts$intercept_beta)
+covariate_estimate <- as.numeric(result2$beta_hat)
+
+if (length(covariate_estimate) != (length(variable_names) - 1)) {
+    stop("result$beta_hat 的长度与变量数量不匹配。")
+}
+
+# 构造完整的 Estimate 数据框
+final_estimate_df_2 <- data.frame(
+    Variable = variable_names,
+    Estimate = c(
+        intercept_estimate,
+        covariate_estimate
+    ),
+    stringsAsFactors = FALSE
+)
+                                        
+# 3. 合并最终的 Estimate 和最终选择的 SE
+final_results_trans_2 <- final_estimate_df_2 %>%
+  dplyr::left_join(final_SE_df_2, by = "Variable")
+final_results_trans_2$z_value <- with(final_results_trans_2, Estimate / SE_final)
+final_results_trans_2$p_value <- with(final_results_trans_2, 2 * pnorm(abs(z_value), lower.tail = FALSE))
+
+# 4. 构造命名向量，用于 calc_curve_with_ci
+coef_trans_2 <- setNames(final_results_trans_2$Estimate, final_results_trans_2$Variable)
+se_trans_2 <- setNames(final_results_trans_2$SE_final, final_results_trans_2$Variable)
+
+# 关键变量列表 (假设 tau_df_tha 和 tha_scaled 已加载)
+key_vars_list <- list(
+  ghb = list(tau = tau_df_tha_ghb_trun$Threshold[tau_df_tha_ghb_trun$Variable == "ghb"], 
+             seq = seq(min(tha_scaled_trun$ghb), max(tha_scaled_trun$ghb), length.out = 200)),
+  Age = list(tau = tau_df_tha_Age_trun$Threshold[tau_df_tha_Age_trun$Variable == "Age"], 
+             seq = seq(min(tha_scaled_trun$Age), max(tha_scaled_trun$Age), length.out = 200))
+)
+
+all_df <- list()
+```
+
+
+
+```{r}
+################################
+### Step7:置信区间可视化对比 ###
+################################
+
+calc_curve_with_ci <- function(x_seq, tau,
+                               key_var,           # 关键变量名
+                               beta_g, beta_phi,
+                               se_g, se_phi,
+                               zval = qnorm(0.975),
+                               model_label = "model",
+                               coef_all = NULL,
+                               se_all_full = NULL, # 新增：包含所有变量SE的命名向量
+                               X_ref = NULL) {
+  
+  # 构造阈值交互项的名称
+  phi_var <- paste0(key_var, "_phi")
+  
+  # --- 1. 固定其他协变量在均值并计算 base_term ---
+  
+  intercept <- if ("(Intercept)" %in% names(coef_all)) coef_all["(Intercept)"] else 0
+  other_vars <- setdiff(names(coef_all), c("(Intercept)", key_var, phi_var))
+  base_term <- intercept 
+  
+  fixed_term_variance <- 0 # 初始化固定项的方差贡献
+  
+  if (!is.null(X_ref) && length(other_vars) > 0) {
+    x_fixed_names <- intersect(other_vars, colnames(X_ref))
+    
+    if (length(x_fixed_names) > 0) {
+        x_fixed <- colMeans(X_ref[, x_fixed_names, drop = FALSE])
+        # 累加其他变量的贡献（系数乘以均值）到 base_term
+        base_term <- base_term + sum(x_fixed * coef_all[names(x_fixed)])
+
+        # --- 2. 计算固定项的方差贡献 ---
+        
+        # 提取固定项（非关键项）的SE
+        se_fixed <- se_all_full[names(x_fixed)]
+        
+        # 贡献项 = (均值)^2 * (SE)^2
+        # 注意：这里我们假设 x_fixed 中的顺序与 se_fixed 中的顺序匹配
+        if (all(names(x_fixed) == names(se_fixed))) {
+            fixed_term_variance <- sum((x_fixed^2) * (se_fixed^2))
+        } else {
+            # 如果不匹配，使用更安全的命名提取
+             fixed_term_variance <- sum((x_fixed^2) * se_all_full[names(x_fixed)]^2)
+        }
+    }
+  }
+  
+  # --- 3. Logit(p) 均值计算 (不变) ---
+  I_gt <- as.numeric(x_seq > tau)
+  logit_p <- base_term + beta_g * x_seq + I_gt * (beta_phi * (x_seq - tau))
+  
+  # --- 4. Delta 法计算 var(logit)（包含所有 Var(beta)）---
+  
+  # A. 截距项方差贡献
+  var_intercept <- se_all_full["(Intercept)"]^2
+  
+  # B. 固定协变量方差贡献 (已在上面计算)
+  var_fixed_terms <- fixed_term_variance 
+  
+  # C. 关键变量及阈值项方差贡献 (原代码部分)
+  var_key_terms <- (x_seq^2) * (se_g^2) + I_gt * ((x_seq - tau)^2) * (se_phi^2)
+  
+  # 总方差 = A + B + C (忽略所有协方差)
+  var_logit <- var_intercept + var_fixed_terms + var_key_terms
+  se_logit <- sqrt(var_logit)
+  
+  # --- 5. CI 和 Predicted Probability 计算 (不变) ---
+  logit_low <- logit_p - zval * se_logit
+  logit_up <- logit_p + zval * se_logit
+  
+  OR <- exp(logit_p); OR_low <- exp(logit_low); OR_up <- exp(logit_up)
+  p_hat <- 1 / (1 + exp(-logit_p)); p_low <- 1 / (1 + exp(-logit_low)); p_up <- 1 / (1 + exp(-logit_up))
+  
+  data.frame(
+    x_var = x_seq,
+    logit = logit_p, logit_low = logit_low, logit_up = logit_up,
+    OR = OR, OR_low = OR_low, OR_up = OR_up, 
+    p = p_hat, p_low = p_low, p_up = p_up,
+    model = model_label,
+    key_var = key_var,
+    stringsAsFactors = FALSE
+  )
+}
+
+for (key_var in names(key_vars_list)) {
+  
+  # 在循环内部定义所有必要的局部变量：
+  tau <- key_vars_list[[key_var]]$tau
+  x_seq <- key_vars_list[[key_var]]$seq
+  phi_var <- paste0(key_var, "_phi")
+  
+  message(paste("Calculating curves for GLM:", key_var))
+  
+  # --- GLM 计算 ---
+  df_glm <- calc_curve_with_ci(
+    x_seq = x_seq, tau = tau, key_var = key_var,
+    beta_g = coef_est[key_var],
+    beta_phi = coef_est[phi_var],
+    se_g = se_est[key_var],
+    se_phi = se_est[phi_var],
+    coef_all = coef_est,
+    se_all_full = se_est, # GLM SE
+    X_ref = X_target_2, # 假设 GLM 和 Trans 使用相同的参考数据进行曲线绘制
+    model_label = "GLM"
+  )
+  
+  # --- A-Trans 计算 ---
+  message(paste("Calculating curves for A-Trans:", key_var))
+  
+  df_trans <- calc_curve_with_ci(
+    x_seq = x_seq, tau = tau, key_var = key_var,
+    beta_g = coef_trans_2[key_var],
+    beta_phi = coef_trans_2[phi_var],
+    se_g = se_trans_2[key_var],
+    se_phi = se_trans_2[phi_var],
+    coef_all = coef_trans_2,
+    se_all_full = se_trans_2, # Trans SE
+    X_ref = X_target_2, 
+    model_label = "A-Trans"
+  )
+  
+  # 合并 GLM 和 Trans 结果
+  all_df[[key_var]] <- rbind(df_glm, df_trans)
+}
+
+# 合并所有计算结果，用于绘图
+combined_plot_data_2 <- do.call(rbind, all_df)
+```
+
+
+
+```{r}
+################################
+### Step7:置信区间可视化对比 ###
+################################
+
+library(ggplot2); library(gridExtra)
+library(dplyr) 
+
+plot_curve_all <- function(combined_df, tau, key_var_name, x_label_name, x_col="x_var_original") {
+  
+  # 筛选当前要绘制的变量的数据
+  plot_data <- combined_df %>%
+    filter(key_var == key_var_name)
+  
+  # 确保 tau 是单一数值，否则取第一个
+  if(length(tau) > 1) {
+      tau <- tau[1]
+  }
+  
+  # --- 1. 动态确定 X 轴的范围（新增的关键步骤） ---
+  # 提取 x_var_original 列的最小值和最大值
+  x_min <- min(plot_data[[x_col]], na.rm = TRUE)
+  x_max <- max(plot_data[[x_col]], na.rm = TRUE)
+  
+  # 设置一个小的缓冲区域（例如 5%）
+  x_buffer <- 0.05 * (x_max - x_min)
+  x_range <- c(x_min - x_buffer, x_max + x_buffer)
+  
+  
+  # --- 2. 创建 Logit(p) 对比图 (p_logit) ---
+  p_logit <- ggplot(plot_data, aes(x = .data[[x_col]], y = logit, color = model, fill = model)) +
+    geom_ribbon(aes(ymin = logit_low, ymax = logit_up), alpha = 0.2, color = NA) +
+    geom_line(size = 0.8) +
+    geom_vline(xintercept = tau, linetype = "dashed", color = "red") +
+    geom_text(
+    x = tau, # X 坐标设置为 tau
+    y = max(plot_data$logit_up, na.rm = TRUE), # Y 坐标设置为 Logit 曲线置信区间的最大值
+    label = paste("τ =", round(tau, 3)), # 标签内容：四舍五入到小数点后三位
+    color = "red", 
+    vjust = -0.5, # 垂直向上微调
+    hjust = 0,    # 水平靠右对齐（使标签位于虚线右侧）
+    size = 3.5,
+    inherit.aes = FALSE # 必须是 FALSE，避免继承 aes(color=model) 等设置
+  ) +
+    scale_color_manual(values = c("GLM" = "#FF7F0E", "A-Trans" = "#17BECF")) +
+    scale_fill_manual(values = c("GLM" = "#FF7F0E", "A-Trans" = "#17BECF")) +
+    
+    # *** 强制设置 X 轴范围 ***
+    coord_cartesian(xlim = x_range) + 
+    
+    labs(
+      title = paste("Logit(p) Curve (", x_label_name, ")"),
+      x = x_label_name,
+      y = "Logit(p)",
+      color = "Model", fill = "Model"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+  # --- 3. 创建 Predicted p 对比图 (p_prob) ---
+  p_prob <- ggplot(plot_data, aes(x = .data[[x_col]], y = p, color = model, fill = model)) +
+    geom_ribbon(aes(ymin = p_low, ymax = p_up), alpha = 0.2, color = NA) +
+    geom_line(size = 0.8) +
+    geom_vline(xintercept = tau, linetype = "dashed", color = "red") +
+    geom_text(
+    x = tau, # X 坐标设置为 tau
+    y = max(plot_data$logit_up, na.rm = TRUE), # Y 坐标设置为 Logit 曲线置信区间的最大值
+    label = paste("τ =", round(tau, 3)), # 标签内容：四舍五入到小数点后三位
+    color = "red", 
+    vjust = -0.5, # 垂直向上微调
+    hjust = 0,    # 水平靠右对齐（使标签位于虚线右侧）
+    size = 3.5,
+    inherit.aes = FALSE # 必须是 FALSE，避免继承 aes(color=model) 等设置
+  ) +
+    scale_color_manual(values = c("GLM" = "#FF7F0E", "A-Trans" = "#17BECF")) +
+    scale_fill_manual(values = c("GLM" = "#FF7F0E", "A-Trans" = "#17BECF")) +
+    
+    # *** 强制设置 X 轴范围 ***
+    coord_cartesian(xlim = x_range) + 
+    
+    labs(
+      title = paste("Predicted Probability Curve (", x_label_name, ")"),
+      x = x_label_name,
+      y = "Predicted Probability (p)",
+      color = "Model", fill = "Model"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+    
+  # --- 4. 新增 OR 对比图 (p_OR) ---
+  p_OR <- ggplot(plot_data, aes(x = .data[[x_col]], y = OR, color = model, fill = model)) +
+    geom_ribbon(aes(ymin = OR_low, ymax = OR_up), alpha = 0.2, color = NA) +
+    geom_line(size = 0.8) +
+    geom_hline(yintercept = 1.0, linetype = "dotted", color = "black") + # OR=1.0 参考线
+    geom_vline(xintercept = tau, linetype = "dashed", color = "red") +
+    geom_text(
+    x = tau, # X 坐标设置为 tau
+    y = max(plot_data$logit_up, na.rm = TRUE), # Y 坐标设置为 Logit 曲线置信区间的最大值
+    label = paste("τ =", round(tau, 3)), # 标签内容：四舍五入到小数点后三位
+    color = "red", 
+    vjust = -0.5, # 垂直向上微调
+    hjust = 0,    # 水平靠右对齐（使标签位于虚线右侧）
+    size = 3.5,
+    inherit.aes = FALSE # 必须是 FALSE，避免继承 aes(color=model) 等设置
+  ) +
+    scale_color_manual(values = c("GLM" = "#FF7F0E", "A-Trans" = "#17BECF")) +
+    scale_fill_manual(values = c("GLM" = "#FF7F0E", "A-Trans" = "#17BECF")) +
+    
+    # *** 强制设置 X 轴范围 ***
+    coord_cartesian(xlim = x_range) + 
+    
+    labs(
+      title = paste("Odds Ratio Curve (", x_label_name, ")"),
+      x = x_label_name,
+      y = "Odds Ratio (OR)",
+      color = "Model", fill = "Model"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+  return(list(p1 = p_logit, p2 = p_prob, p3 = p_OR)) 
+}
+```
+
+
+
+```{r}
+################################
+### Step7:置信区间可视化对比 ###
+################################
+
+# --- A. 提取标准化参数 ---
+
+get_params <- function(var_name, dataset) {
+  
+  var_scaled <- dataset[[var_name]]
+  mu <- attr(var_scaled, "scaled:center")
+  sigma <- attr(var_scaled, "scaled:scale")
+  
+  if (is.null(mu) || is.null(sigma)) {
+      stop(paste("Standardization attributes (center/scale) not found for", var_name))
+  }
+  
+  return(list(mu = mu, sigma = sigma))
+}
+
+# --- B. 循环计算和反向标准化 ---
+
+scaling_df <- data.frame(key_var = names(key_vars_list)) %>%
+  rowwise() %>%
+  mutate(
+    # 使用 get_params 函数获取 mu 和 sigma
+    params = list(get_params(key_var, tha_scaled_trun)),
+    mu_val = params$mu,
+    sigma_val = params$sigma
+  ) %>%
+  ungroup() %>%
+  dplyr::select(key_var, mu_val, sigma_val)
+
+combined_plot_data_2 <- combined_plot_data_2 %>%
+  # 1. 合并标准化参数查找表
+  left_join(scaling_df, by = "key_var") %>%
+  
+  # 2. 计算 x_var_original
+  mutate(
+    # X_original = X_scaled * sigma + mu
+    x_var_original = x_var * sigma_val + mu_val
+  ) %>%
+  
+  # 3. 移除用于计算的临时列
+  dplyr::select(-mu_val, -sigma_val)
+
+# --- C. 调用新的绘图函数 ---
+
+# 原始尺度的阈值 tau 是需要展示在图上的红线
+# 由于模型在标准化尺度上拟合和识别 tau，我们通常反向标准化 tau 来得到原始尺度的位置。
+
+# 假设 tau_df_tha_ghb_trun 和 tau_df_tha_Age 中包含的 tau 是标准化后的。
+
+# 1. ghb 图
+ghb_params <- get_params("ghb", tha_scaled_trun)
+tau_ghb_original <- key_vars_list$ghb$tau * ghb_params$sigma + ghb_params$mu
+
+ghb_plots <- plot_curve_all(combined_plot_data_2, tau_ghb_original, "ghb", "ghb (Original Scale)")
+
+grid.arrange(ghb_plots$p1, ghb_plots$p2, ncol = 2, 
+             top = "ghb Threshold Effect: Logit and Predicted Probability")
+
+
+# 2. Age 图
+age_params <- get_params("Age", tha_scaled_trun)
+tau_age_original <- key_vars_list$Age$tau * age_params$sigma + age_params$mu
+
+age_plots <- plot_curve_all(combined_plot_data_2, tau_age_original, "Age", "Age (Original Scale)")
+
+grid.arrange(age_plots$p1, age_plots$p2, ncol = 2, 
+             top = "Age Threshold Effect: Logit and Predicted Probability")
+```
+
+
+
+```{r}
+################################
+### Step8:AIC、AUC等指标对比 ###
+################################
+
+library(dplyr)
+library(pROC)
+library(stats)
+
+# ----------------------------------------------------
+# 步骤 1 & 2: 预测和评估函数（保持不变）
+# ----------------------------------------------------
+
+#' 核心预测函数：计算 Logit 模型下的预测概率
+#' @param X 协变量矩阵（列名必须与Beta的名称匹配）
+#' @param Beta 系数向量
+predict_glm_prob <- function(X, Beta) {
+  # 确保 X 矩阵的列名与 Beta 的名称匹配
+  if (!all(colnames(X) == names(Beta))) {
+    stop("X 矩阵的列顺序与 Beta 向量的名称不匹配，请先匹配。")
+  }
+  linear_predictor <- X %*% Beta
+  probabilities <- 1 / (1 + exp(-linear_predictor))
+  return(as.vector(probabilities))
+}
+
+#' 核心评估函数：计算 AIC 和 AUC
+evaluate_model <- function(probabilities, actual_y, num_params) {
+  # 计算对数似然
+  logLik <- sum(actual_y * log(probabilities) + (1 - actual_y) * log(1 - probabilities), na.rm = TRUE)
+  
+  # 1. 计算 AIC: AIC = -2 * logLik + 2 * k
+  aic_value <- -2 * logLik + 2 * num_params
+  
+  # 2. 计算 AUC
+  auc_roc <- tryCatch({
+    roc_obj <- roc(actual_y, probabilities, quiet = TRUE)
+    auc(roc_obj)
+  }, error = function(e) {
+    warning("AUC calculation failed.")
+    return(NA)
+  })
+  
+  return(list(AIC = aic_value, AUC = auc_roc))
+}
+
+# ----------------------------------------------------
+# 步骤 3: 评估 GLM 模型 (基于 coef_est)
+# ----------------------------------------------------
+
+X_target_2_intercept <- cbind("(Intercept)" = 1, X_target_2)
+
+# 获取 GLM 模型所需的协变量名称和顺序
+coef_names_est <- names(coef_est)
+
+# 重新排列/选择 X 矩阵的列，使其与 coef_est 的名称顺序严格一致
+X_est_matched <- X_target_2_intercept[, coef_names_est, drop = FALSE]
+
+prob_est <- predict_glm_prob(X_est_matched, coef_est)
+k_est <- length(coef_est) 
+eval_est <- evaluate_model(prob_est, y_target_2, k_est)
+
+
+# ----------------------------------------------------
+# 步骤 4: 评估 A-Trans/阈值 GLM 模型 (基于 coef_trans)
+# ----------------------------------------------------
+
+# 获取 A-Trans 模型所需的协变量名称和顺序（这些名称应包含阈值项的名称）
+coef_names_trans_2 <- names(coef_trans_2)
+
+# 重新排列/选择 X 矩阵的列，使其与 coef_trans 的名称顺序严格一致
+X_trans_matched_2 <- X_target_2_intercept[, coef_names_trans_2, drop = FALSE]
+
+prob_trans_2 <- predict_glm_prob(X_trans_matched_2, coef_trans_2)
+k_trans_2 <- length(coef_trans_2)
+eval_trans_2 <- evaluate_model(prob_trans_2, y_target_2, k_trans_2)
+
+# ----------------------------------------------------
+# 步骤 5: 生成对比表格
+# ----------------------------------------------------
+
+comparison_table_2 <- data.frame(
+  Model = c("GLM (coef_est)", "A-Trans(coef_trans)"),
+  AIC = c(eval_est$AIC, eval_trans_2$AIC),
+  AUC = c(eval_est$AUC, eval_trans_2$AUC),
+  Num_Parameters = c(k_est, k_trans_2)
+) %>%
+  mutate(
+    AIC = round(AIC, 3),
+    AUC = round(AUC, 3)
+  )
+
+print("--- 模型评估对比表 ---")
+print(comparison_table_2)
+```
+
+
+
+```{r}
+##################################
+### Step9:惩罚超参数敏感度测试 ###
+##################################
+
+final_SE_df_3 <- select_SE(result = result3, 
+                         result_CI_C = result3_CI_C, 
+                         result_CI_D = result3_CI_D)
+
+# 从 result2_CI_C 中获取 Variable 列表和顺序作为参考
+variable_names <- result3_CI_C$ci_table$Variable
+
+# 提取并合并所有 Estimate 值
+intercept_estimate <- as.numeric(result3$intercepts$intercept_beta)
+covariate_estimate <- as.numeric(result3$beta_hat)
+
+if (length(covariate_estimate) != (length(variable_names) - 1)) {
+    stop("result$beta_hat 的长度与变量数量不匹配。")
+}
+
+# 构造完整的 Estimate 数据框
+final_estimate_df_3 <- data.frame(
+    Variable = variable_names,
+    Estimate = c(
+        intercept_estimate,
+        covariate_estimate
+    ),
+    stringsAsFactors = FALSE
+)
+                                        
+# 3. 合并最终的 Estimate 和最终选择的 SE
+final_results_trans_3 <- final_estimate_df_3 %>%
+  dplyr::left_join(final_SE_df_3, by = "Variable")
+final_results_trans_3$z_value <- with(final_results_trans_3, Estimate / SE_final)
+final_results_trans_3$p_value <- with(final_results_trans_3, 2 * pnorm(abs(z_value), lower.tail = FALSE))
+
+# 4. 构造命名向量，用于 calc_curve_with_ci
+coef_trans_3 <- setNames(final_results_trans_3$Estimate, final_results_trans_3$Variable)
+se_trans_3 <- setNames(final_results_trans_3$SE_final, final_results_trans_3$Variable)
+```
+
+
+
+```{r}
+##################################
+### Step9:惩罚超参数敏感度测试 ###
+##################################
+
+for (key_var in names(key_vars_list)) {
+  
+  # 在循环内部定义所有必要的局部变量：
+  tau <- key_vars_list[[key_var]]$tau
+  x_seq <- key_vars_list[[key_var]]$seq
+  phi_var <- paste0(key_var, "_phi")
+  
+  message(paste("Calculating curves for GLM:", key_var))
+  
+  # --- GLM 计算 ---
+  df_glm <- calc_curve_with_ci(
+    x_seq = x_seq, tau = tau, key_var = key_var,
+    beta_g = coef_est[key_var],
+    beta_phi = coef_est[phi_var],
+    se_g = se_est[key_var],
+    se_phi = se_est[phi_var],
+    coef_all = coef_est,
+    se_all_full = se_est, # GLM SE
+    X_ref = X_target_2, # 假设 GLM 和 Trans 使用相同的参考数据进行曲线绘制
+    model_label = "GLM"
+  )
+  
+  # --- A-Trans 计算 ---
+  message(paste("Calculating curves for A-Trans:", key_var))
+  
+  df_trans <- calc_curve_with_ci(
+    x_seq = x_seq, tau = tau, key_var = key_var,
+    beta_g = coef_trans_3[key_var],
+    beta_phi = coef_trans_3[phi_var],
+    se_g = se_trans_3[key_var],
+    se_phi = se_trans_3[phi_var],
+    coef_all = coef_trans_3,
+    se_all_full = se_trans_3, # Trans SE
+    X_ref = X_target_2, 
+    model_label = "A-Trans"
+  )
+  
+  # 合并 GLM 和 Trans 结果
+  all_df[[key_var]] <- rbind(df_glm, df_trans)
+}
+
+# 合并所有计算结果，用于绘图
+combined_plot_data_3 <- do.call(rbind, all_df)
+```
+
+
+
+```{r}
+##################################
+### Step9:惩罚超参数敏感度测试 ###
+##################################
+
+combined_plot_data_3 <- combined_plot_data_3 %>%
+  # 1. 合并标准化参数查找表
+  left_join(scaling_df, by = "key_var") %>%
+  
+  # 2. 计算 x_var_original
+  mutate(
+    # X_original = X_scaled * sigma + mu
+    x_var_original = x_var * sigma_val + mu_val
+  ) %>%
+  
+  # 3. 移除用于计算的临时列
+  dplyr::select(-mu_val, -sigma_val)
+
+# 1. ghb 图
+ghb_params <- get_params("ghb", tha_scaled_trun)
+tau_ghb_original <- key_vars_list$ghb$tau * ghb_params$sigma + ghb_params$mu
+
+ghb_plots <- plot_curve_all(combined_plot_data_3, tau_ghb_original, "ghb", "ghb (Original Scale)")
+
+grid.arrange(ghb_plots$p1, ghb_plots$p2, ncol = 2, 
+             top = "ghb Threshold Effect: Logit and Predicted Probability")
+
+
+# 2. Age 图
+age_params <- get_params("Age", tha_scaled_trun)
+tau_age_original <- key_vars_list$Age$tau * age_params$sigma + age_params$mu
+
+age_plots <- plot_curve_all(combined_plot_data_3, tau_age_original, "Age", "Age (Original Scale)")
+
+grid.arrange(age_plots$p1, age_plots$p2, ncol = 2, 
+             top = "Age Threshold Effect: Logit and Predicted Probability")
+```
+
+
+
+```{r}
+##################################
+### Step9:惩罚超参数敏感度测试 ###
+##################################
+
+# ----------------------------------------------------
+# 步骤 4: 评估 A-Trans/阈值 GLM 模型 (基于 coef_trans)
+# ----------------------------------------------------
+
+# 获取 A-Trans 模型所需的协变量名称和顺序（这些名称应包含阈值项的名称）
+coef_names_trans_3 <- names(coef_trans_3)
+
+# 重新排列/选择 X 矩阵的列，使其与 coef_trans 的名称顺序严格一致
+X_trans_matched_3 <- X_target_2_intercept[, coef_names_trans_3, drop = FALSE]
+
+prob_trans_3 <- predict_glm_prob(X_trans_matched_3, coef_trans_3)
+k_trans_3 <- length(coef_trans_3)
+eval_trans_3 <- evaluate_model(prob_trans_3, y_target_2, k_trans_3)
+
+# ----------------------------------------------------
+# 步骤 5: 生成对比表格
+# ----------------------------------------------------
+
+comparison_table_3 <- data.frame(
+  Model = c("GLM (coef_est)", "A-Trans(coef_trans)"),
+  AIC = c(eval_est$AIC, eval_trans_3$AIC),
+  AUC = c(eval_est$AUC, eval_trans_3$AUC),
+  Num_Parameters = c(k_est, k_trans_3)
+) %>%
+  mutate(
+    AIC = round(AIC, 3),
+    AUC = round(AUC, 3)
+  )
+
+print("--- 模型评估对比表 ---")
+print(comparison_table_3)
+```
+
+
+
+```{r}
+#################################
+### Step10:阈值是否相等的检验 ###
+#################################
+
+# =================== 阈值检测（ghb，使用tha_cleaned_trun数据） ===================
+
+alpha_level <- 0.1
+
+best_tau_ghb_tha_trun_init <- NA
+# best_tau_age_tha <- NA
+pval_ghb_trun <- NA
+# pval_age <- NA
+
+# 初始模型公式（无阈值项）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb"
+
+# 1️⃣ 拟合基础模型
+base_model <- glm(as.formula(initial_formula), family = binomial, data = tha_cleaned_trun)
+
+# 2️⃣ 检测 ghb 阈值效应
+st_ghb <- score_test_for_threshold(
+  var_vec = tha_cleaned_trun$ghb,
+  Y = tha_cleaned_trun$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_ghb_trun <- st_ghb$p.value
+cat("ghb 阈值效应 p-value =", signif(pval_ghb_trun, 4), "\n")
+
+# 若显著，估计 tau 并加入模型
+if (!is.na(pval_ghb_trun) && pval_ghb_trun < alpha_level) {
+  est_ghb <- estimate_tau_by_grid(
+    var_vec = tha_cleaned_trun$ghb,
+    dat_full = tha_cleaned_trun,
+    base_formula = initial_formula,
+    ngrid = 100
+  )
+  best_tau_ghb_tha_trun_init <- est_ghb$best_tau
+  
+  # ---- 结果汇总 ----
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("ghb 阈值效应: p = %s (显著)\n", formatC(pval_ghb_trun, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 AIC 网格搜索) = %.4f\n", best_tau_ghb_tha_trun_init))
+  
+} else {
+  # 若不显著，也输出默认建议
+  best_tau_ghb_tha_trun_init <- median(tha_cleaned_trun$ghb, na.rm = TRUE)
+  
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("ghb 阈值效应: p = %s (不显著)\n", formatC(pval_ghb_trun, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 中位数) = %.4f\n", best_tau_ghb_tha_trun_init))
+}
+
+cat("\n================ To-SNR 单阈值模型（ghb，使用tha_cleaned_trun数据）===============\n")
+
+tryCatch({
+  
+  # ---- 初始化 ----
+  tau_init <- c(ghb = best_tau_ghb_tha_trun_init)  # 单阈值初始值
+  
+  # 🔹全局变量供 ToSNR_logistic 使用
+  # ---- 全局变量 ----
+  Y <- tha_cleaned_trun$GDM
+  X <- tha_cleaned_trun$ghb
+  Z_vars <- c("Age","Ethnicity","IVF","Parity","BMI","HB","MCH","MCV","FF")
+  Z <- tha_cleaned_trun[, Z_vars, drop = FALSE]
+  
+  # 保证 Z 原子列
+  Z <- as.data.frame(lapply(Z, function(x) {
+    if (is.character(x)) factor(x) else x
+  }))
+  
+  # ---- 调用 To-SNR 优化 ----
+  tau_est <- ToSNR_logistic_1dim(tau_init)
+  tau_ghb <- tau_est$tau
+  best_tau_ghb_tha_trun_init <- tau_ghb
+  
+  # ---- 在 To-SNR 优化后构造 Age_phi ----
+  tha_cleaned_trun$ghb_phi <- as.numeric(tha_cleaned_trun$ghb > tau_ghb) * (tha_cleaned_trun$ghb - tau_ghb)
+  
+  # ---- 拟合最终 GLM ----
+  glm_data <- data.frame(Y = Y, ghb = X, ghb_phi = tha_cleaned_trun$ghb_phi, Z)
+  glm_final_tha_init <- glm(Y ~ ., family = "binomial", data = glm_data, control = list(maxit = 25))
+  print(summary(glm_final_tha_init))
+  
+  # ---- AUC 评估 ----
+  pred_joint <- predict(glm_final_tha_init, type = "response")
+  auc_tosnr <- pROC::auc(Y, pred_joint)
+  cat(sprintf("\nTo-SNR 模型（ghb）联合 AUC = %.4f\n", auc_tosnr))
+  
+  # ---- 输出阈值表 ----
+  tau_df_tha_ghb_trun_init <- data.frame(
+    Variable = names(tau_ghb),
+    Threshold = tau_ghb
+  )
+  print(tau_df_tha_ghb_trun_init)
+  
+}, error = function(e) {
+  cat("❌ To-SNR 模型（ghb）出错：", e$message, "\n")
+})
+
+# =================== 阈值检测（ghb2，使用tha_cleaned_trun数据） ===================
+
+# 初始模型公式（包含 ghb_phi）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb + ghb_phi"
+
+# ---- 基础模型拟合 ----
+base_model <- glm(as.formula(initial_formula), family = binomial, data = tha_cleaned_trun)
+
+st_ghb <- score_test_for_threshold(
+  var_vec = tha_cleaned_trun$ghb,
+  Y = tha_cleaned_trun$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_ghb_trun <- st_ghb$p.value
+cat("ghb 阈值效应 p-value =", signif(pval_ghb_trun, 4), "\n")
+
+# =================== 阈值检测（Age，使用tha_cleaned_trun数据） ===================
+
+# ---- 检测 Age 阈值效应 ----
+st_age_simp <- score_test_for_threshold_simp(
+  var_vec = tha_cleaned_trun$Age,
+  Y = tha_cleaned_trun$GDM,
+  fitted_model = base_model,
+  tau = c(34)
+)
+pval_Age_trun <- st_age_simp$p.value
+cat("Age 阈值效应 p-value =", signif(pval_Age_trun, 4), "\n")
+best_tau_age_tha_init <- 34
+
+cat("\n================ To-SNR 单阈值模型（Age，使用tha_cleaned_trun数据）===============\n")
+
+tryCatch({
+  # ---- 初始化 ----
+  tau_init <- c(Age = 34)
+  
+  # ---- 全局变量 ----
+  Y <- tha_cleaned_trun$GDM
+  X <- tha_cleaned_trun$Age
+  Z_vars <- c("ghb", "ghb_phi", "Ethnicity", "IVF", "Parity", "BMI", "HB", "MCH", "MCV", "FF")
+  Z <- tha_cleaned_trun[, Z_vars, drop = FALSE]
+  
+  # 保证 Z 原子列
+  Z <- as.data.frame(lapply(Z, function(x) {
+    if (is.character(x)) factor(x) else x
+  }))
+  
+  # ---- 调用 To-SNR 优化 ----
+  tau_est <- ToSNR_logistic_1dim(tau_init)
+  tau_age <- tau_est$tau
+  best_tau_age_tha_init <- tau_age
+  
+  # ---- 在 To-SNR 优化后构造 Age_phi ----
+  tha_cleaned_trun$Age_phi <- as.numeric(tha_cleaned_trun$Age > tau_age) * (tha_cleaned_trun$Age - tau_age)
+  
+  # ---- 拟合最终 GLM ----
+  glm_data <- data.frame(Y = Y, Age = X, Age_phi = tha_cleaned_trun$Age_phi, Z)
+  glm_final_tha_init <- glm(Y ~ ., family = "binomial", data = glm_data, control = list(maxit = 25))
+  print(summary(glm_final_tha_init))
+  
+  # ---- AUC 评估 ----
+  pred_joint <- predict(glm_final_tha_init, type = "response")
+  auc_tosnr <- pROC::auc(Y, pred_joint)
+  cat(sprintf("\nTo-SNR 模型（Age）联合 AUC = %.4f\n", auc_tosnr))
+  
+  # ---- 输出阈值表 ----
+  tau_df_tha_Age_trun_init <- data.frame(
+    Variable = names(tau_age),
+    Threshold = tau_age
+  )
+  print(tau_df_tha_Age_trun_init)
+  
+}, error = function(e) {
+  cat("❌ To-SNR 模型（Age）出错：", e$message, "\n")
+})
+```
+
+
+
+```{r}
+#################################
+### Step10:阈值是否相等的检验 ###
+#################################
+
+# =================== 阈值检测（ghb，使用norm_init数据） ===================
+
+alpha_level <- 0.1
+
+best_tau_ghb_norm_init <- NA
+# best_tau_age_norm <- NA
+pval_ghb <- NA
+# pval_age <- NA
+
+# 初始模型公式（无阈值项）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb"
+
+# 1️⃣ 拟合基础模型
+base_model <- glm(as.formula(initial_formula), family = binomial, data = norm_init)
+
+# 2️⃣ 检测 ghb 阈值效应
+st_ghb <- score_test_for_threshold(
+  var_vec = norm_init$ghb,
+  Y = norm_init$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_ghb <- st_ghb$p.value
+cat("ghb 阈值效应 p-value =", signif(pval_ghb, 4), "\n")
+
+# 若显著，估计 tau 并加入模型
+if (!is.na(pval_ghb) && pval_ghb < alpha_level) {
+  est_ghb <- estimate_tau_by_grid(
+    var_vec = norm_init$ghb,
+    dat_full = norm_init,
+    base_formula = initial_formula,
+    ngrid = 100
+  )
+  best_tau_ghb_norm_init <- est_ghb$best_tau
+  
+  # ---- 结果汇总 ----
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("ghb 阈值效应: p = %s (显著)\n", formatC(pval_ghb, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 AIC 网格搜索) = %.4f\n", best_tau_ghb_norm_init))
+  
+} else {
+  # 若不显著，也输出默认建议
+  best_tau_ghb_norm_init <- median(norm_init$ghb, na.rm = TRUE)
+  
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("Age 阈值效应: p = %s (不显著)\n", formatC(pval_age, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 中位数) = %.4f\n", best_tau_ghb_norm_init))
+}
+
+cat("\n================ To-SNR 单阈值模型（ghb，使用norm_init数据）===============\n")
+
+tryCatch({
+  
+  # ---- 初始化 ----
+  tau_init <- c(ghb = best_tau_ghb_norm_init)  # 单阈值初始值
+  
+  # 🔹全局变量供 ToSNR_logistic 使用
+  # ---- 全局变量 ----
+  Y <- norm_init$GDM
+  X <- norm_init$ghb
+  Z_vars <- c("Age","Ethnicity","IVF","Parity","BMI","HB","MCH","MCV","FF")
+  Z <- norm_init[, Z_vars, drop = FALSE]
+  
+  # 保证 Z 原子列
+  Z <- as.data.frame(lapply(Z, function(x) {
+    if (is.character(x)) factor(x) else x
+  }))
+  
+  # ---- 调用 To-SNR 优化 ----
+  tau_est <- ToSNR_logistic_1dim(tau_init)
+  tau_ghb <- tau_est$tau
+  best_tau_ghb_norm_init <- tau_ghb
+  
+  # ---- 在 To-SNR 优化后构造 ghb_phi ----
+  norm_init$ghb_phi <- as.numeric(norm_init$ghb > tau_ghb) * (norm_init$ghb - tau_ghb)
+  
+  # ---- 拟合最终 GLM ----
+  glm_data <- data.frame(Y = Y, ghb = X, ghb_phi = norm_init$ghb_phi, Z)
+  glm_final_norm_init <- glm(Y ~ ., family = "binomial", data = glm_data, control = list(maxit = 25))
+  print(summary(glm_final_norm_init))
+  
+  # ---- AUC 评估 ----
+  pred_joint <- predict(glm_final_norm_init, type = "response")
+  auc_tosnr <- pROC::auc(Y, pred_joint)
+  cat(sprintf("\nTo-SNR 模型（ghb）联合 AUC = %.4f\n", auc_tosnr))
+  
+  # ---- 输出阈值表 ----
+  tau_df_norm_ghb_init <- data.frame(
+    Variable = names(tau_ghb),
+    Threshold = tau_ghb
+  )
+  print(tau_df_norm_ghb_init)
+  
+}, error = function(e) {
+  cat("❌ To-SNR 模型（ghb）出错：", e$message, "\n")
+})
+
+# =================== 阈值检测（ghb2，使用norm_init数据） ===================
+
+# 初始模型公式（包含 ghb_phi）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb + ghb_phi"
+
+# ---- 基础模型拟合 ----
+base_model <- glm(as.formula(initial_formula), family = binomial, data = norm_init)
+
+st_ghb <- score_test_for_threshold(
+  var_vec = norm_init$ghb,
+  Y = norm_init$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_ghb <- st_ghb$p.value
+cat("ghb 阈值效应 p-value =", signif(pval_ghb, 4), "\n")
+
+# =================== 阈值检测（Age，使用 norm_init数据） ===================
+
+alpha_level <- 0.1
+
+# best_tau_ghb_norm <- NA   # 保留原变量名（方便后续兼容）
+best_tau_age_norm_init <- NA
+# pval_ghb <- NA
+pval_age <- NA
+
+# 初始模型公式（包含 ghb_phi）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb + ghb_phi"
+
+# ---- 基础模型拟合 ----
+base_model <- glm(as.formula(initial_formula), family = binomial, data = norm_init)
+
+# ---- 检测 Age 阈值效应 ----
+st_age <- score_test_for_threshold(
+  var_vec = norm_init$Age,
+  Y = norm_init$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_age <- st_age$p.value
+cat("Age 阈值效应 p-value =", signif(pval_age, 4), "\n")
+
+# 若显著，则估计 tau 并更新模型
+if (!is.na(pval_age) && pval_age < alpha_level) {
+  est_age <- estimate_tau_by_grid(
+    var_vec = norm_init$Age,
+    dat_full = norm_init,
+    base_formula = initial_formula,
+    ngrid = 100
+  )
+  best_tau_age_norm_init <- est_age$best_tau
+  
+  # ---- 结果汇总 ----
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("Age 阈值效应: p = %s (显著)\n", formatC(pval_age, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 AIC 网格搜索) = %.4f\n", best_tau_age_norm_init))
+  
+} else {
+  # 若不显著，也输出默认建议
+  best_tau_age_norm_init <- median(norm_init$Age, na.rm = TRUE)
+  
+  cat("\n---- 阈值检测总结 ----\n")
+  cat("显著性水平 α =", alpha_level, "\n\n")
+  cat(sprintf("Age 阈值效应: p = %s (不显著)\n", formatC(pval_age, format = "f", digits = 4)))
+  cat(sprintf("推荐 To-SNR 初始化阈值 (基于 AIC 网格搜索) = %.4f\n", best_tau_age_norm_init))
+}
+
+cat("\n================ To-SNR 单阈值模型（Age）===============\n")
+
+tryCatch({
+  # ---- 初始化 ----
+  tau_init <- c(Age = 31)
+  
+  # ---- 全局变量 ----
+  Y <- norm_init$GDM
+  X <- norm_init$Age
+  Z_vars <- c("ghb", "ghb_phi", "Ethnicity", "IVF", "Parity", "BMI", "HB", "MCH", "MCV", "FF")
+  Z <- norm_init[, Z_vars, drop = FALSE]
+  
+  # 保证 Z 原子列
+  Z <- as.data.frame(lapply(Z, function(x) {
+    if (is.character(x)) factor(x) else x
+  }))
+  
+  # ---- 调用 To-SNR 优化 ----
+  tau_est <- ToSNR_logistic_1dim(tau_init)
+  tau_age <- tau_est$tau
+  best_tau_age_norm_init <- tau_age
+  
+  # ---- 在 To-SNR 优化后构造 Age_phi ----
+  norm_init$Age_phi <- as.numeric(norm_init$Age > tau_age) * (norm_init$Age - tau_age)
+  
+  # ---- 拟合最终 GLM ----
+  glm_data <- data.frame(Y = Y, Age = X, Age_phi = norm_init$Age_phi, Z)
+  glm_final_norm_init <- glm(Y ~ ., family = "binomial", data = glm_data, control = list(maxit = 25))
+  print(summary(glm_final_norm_init))
+  
+  # ---- AUC 评估 ----
+  pred_joint <- predict(glm_final_norm_init, type = "response")
+  auc_tosnr <- pROC::auc(Y, pred_joint)
+  cat(sprintf("\nTo-SNR 模型（Age）联合 AUC = %.4f\n", auc_tosnr))
+  
+  # ---- 输出阈值表 ----
+  tau_df_norm_Age_init <- data.frame(
+    Variable = names(tau_age),
+    Threshold = tau_age
+  )
+  print(tau_df_norm_Age_init)
+  
+}, error = function(e) {
+  cat("❌ To-SNR 模型（Age）出错：", e$message, "\n")
+})
+
+# =================== 阈值检测（Age2，使用norm_init数据） ===================
+
+# 初始模型公式（包含 ghb_phi）
+initial_formula <- "GDM ~ Age + Ethnicity + IVF + Parity + BMI + HB + MCH + MCV + FF + ghb + ghb_phi + Age_phi"
+
+# ---- 基础模型拟合 ----
+base_model <- glm(as.formula(initial_formula), family = binomial, data = norm_init)
+
+st_age <- score_test_for_threshold(
+  var_vec = norm_init$Age,
+  Y = norm_init$GDM,
+  fitted_model = base_model,
+  M = 10
+)
+pval_age <- st_age$p.value
+cat("Age 阈值效应 p-value =", signif(pval_age, 4), "\n")
+```
+
+
+
+```{r}
+#################################
+### Step10:阈值是否相等的检验 ###
+#################################
+
+### norm数据集 ###
+
+# 1. 提取系数
+beta_hat_norm_ghb_init <- coef(glm_final_norm_init)
+beta_11_hat_norm_ghb_init <- beta_hat_norm_ghb_init["ghb_phi"]
+
+# 2. 提取阈值（确保是单个数值）
+tau_value_norm_ghb_init <- as.numeric(tau_df_norm_ghb_init$Threshold[1])
+
+# 3. 预测概率
+mu_hat_norm_init <- predict(glm_final_norm_init, type = "response")
+mu_hat_norm_init <- pmin(pmax(mu_hat_norm_init, 1e-8), 1 - 1e-8)  # 避免极值
+
+# 4. 计算期望
+indicator_norm_ghb_init <- as.numeric(norm_init$ghb > tau_value_norm_ghb_init)
+expectation_norm_ghb_init <- mean(
+  beta_11_hat_norm_ghb_init^2 * indicator_norm_ghb_init * mu_hat_norm_init * (1 - mu_hat_norm_init),
+  na.rm = TRUE
+)
+
+# 5. 方差
+var_tau_hat_norm_ghb_init <- 1 / expectation_norm_ghb_init / nrow(norm_init)
+
+cat("Estimated asymptotic variance of sqrt(n)*(tau_hat - tau_0):", var_tau_hat_norm_ghb_init, "\n")
+
+### tha数据集 ###
+
+# 1. 提取系数
+beta_hat_tha_ghb_init <- coef(glm_final_tha_init)
+beta_11_hat_tha_ghb_init <- beta_hat_tha_ghb_init["ghb_phi"]
+
+# 2. 提取阈值（确保是单个数值）
+tau_value_tha_ghb_init <- as.numeric(tau_df_tha_ghb_trun_init$Threshold[1])
+
+# 3. 预测概率
+mu_hat_tha_init <- predict(glm_final_tha_init, type = "response")
+mu_hat_tha_init <- pmin(pmax(mu_hat_tha_init, 1e-8), 1 - 1e-8)  # 避免极值
+
+# 4. 计算期望
+indicator_tha_ghb_init <- as.numeric(tha_cleaned_trun$ghb > tau_value_tha_ghb_init)
+expectation_tha_ghb_init <- mean(
+  beta_11_hat_tha_ghb_init^2 * indicator_tha_ghb_init * mu_hat_tha_init * (1 - mu_hat_tha_init),
+  na.rm = TRUE
+)
+
+# 5. 方差
+var_tau_hat_tha_ghb_init <- 1 / expectation_tha_ghb_init / nrow(tha_cleaned_trun)
+
+cat("Estimated asymptotic variance of sqrt(n)*(tau_hat - tau_0):", var_tau_hat_tha_ghb_init, "\n")
+
+### 假设二者独立的假设检验 ###
+se_diff_ghb <- sqrt(var_tau_hat_norm_ghb_init + var_tau_hat_tha_ghb_init)
+Z <- (tau_df_norm_ghb_init$Threshold - tau_df_tha_ghb_trun_init$Threshold) / se_diff_ghb
+pval_ghb <- 2 * (1 - pnorm(abs(Z)))
+cat("Z =", Z, "p =", pval_ghb, "\n")
+```
+
+
+
+```{r}
+#################################
+### Step10:阈值是否相等的检验 ###
+#################################
+
+### norm数据集 ###
+
+# 1. 提取系数
+beta_hat_norm_Age_init <- coef(glm_final_norm_init)
+beta_11_hat_norm_Age_init <- beta_hat_norm_Age_init["Age_phi"]
+
+# 2. 提取阈值（确保是单个数值）
+tau_value_norm_Age_init <- as.numeric(tau_df_norm_Age_init$Threshold[1])
+
+# 3. 预测概率
+mu_hat_norm_init <- predict(glm_final_norm_init, type = "response")
+mu_hat_norm_init <- pmin(pmax(mu_hat_norm_init, 1e-8), 1 - 1e-8)  # 避免极值
+
+# 4. 计算期望
+indicator_norm_Age_init <- as.numeric(norm_init$Age > tau_value_norm_Age_init)
+expectation_norm_Age_init <- mean(
+  beta_11_hat_norm_Age_init^2 * indicator_norm_Age_init * mu_hat_norm_init * (1 - mu_hat_norm_init),
+  na.rm = TRUE
+)
+
+# 5. 方差
+var_tau_hat_norm_Age_init <- 1 / expectation_norm_Age_init / nrow(norm_init)
+
+cat("Estimated asymptotic variance of sqrt(n)*(tau_hat - tau_0):", var_tau_hat_norm_Age_init, "\n")
+
+### tha数据集 ###
+
+# 1. 提取系数
+beta_hat_tha_Age_init <- coef(glm_final_tha_init)
+beta_11_hat_tha_Age_init <- beta_hat_tha_Age_init["Age_phi"]
+
+# 2. 提取阈值（确保是单个数值）
+tau_value_tha_Age_init <- as.numeric(tau_df_tha_Age_trun_init$Threshold[1])
+
+# 3. 预测概率
+mu_hat_tha_init <- predict(glm_final_tha_init, type = "response")
+mu_hat_tha_init <- pmin(pmax(mu_hat_tha_init, 1e-8), 1 - 1e-8)  # 避免极值
+
+# 4. 计算期望
+indicator_tha_Age_init <- as.numeric(tha_cleaned_trun$Age > tau_value_tha_Age_init)
+expectation_tha_Age_init <- mean(
+  beta_11_hat_tha_Age_init^2 * indicator_tha_Age_init * mu_hat_tha_init * (1 - mu_hat_tha_init),
+  na.rm = TRUE
+)
+
+# 5. 方差
+var_tau_hat_tha_Age_init <- 1 / expectation_tha_Age_init / nrow(tha_cleaned_trun)
+
+cat("Estimated asymptotic variance of sqrt(n)*(tau_hat - tau_0):", var_tau_hat_tha_Age_init, "\n")
+
+### 假设二者独立的假设检验 ###
+se_diff_Age <- sqrt(var_tau_hat_norm_Age_init + var_tau_hat_tha_Age_init)
+Z <- (tau_df_norm_Age_init$Threshold - tau_df_tha_Age_trun_init$Threshold) / se_diff_Age
+pval_Age <- 2 * (1 - pnorm(abs(Z)))
+cat("Z =", Z, "p =", pval_Age, "\n")
+```
+
+
+
+```{r}
+###################################
+### Step11:变量层级可迁移性探索 ###
+###################################
+
+delta_score_test_refined <- function(X_target, y_target, X_source, y_source, w_hat, intercept_w) {
+  n0 <- nrow(X_target)
+  nk <- nrow(X_source)
+  n_total <- n0 + nk
+  p <- ncol(X_target)
+  
+  # 1. 目标域计算 (与之前一致)
+  eta_null <- as.vector(X_target %*% w_hat + intercept_w)
+  prob_null <- 1 / (1 + exp(-eta_null))
+  res_t <- y_target - prob_null
+  w_t <- prob_null * (1 - prob_null)
+  
+  # 目标域 Hessian (J_n)
+  J_n <- t(X_target) %*% (diag(w_t) %*% X_target) / n0
+  
+  # 2. 计算 Var(w_hat) 的贡献
+  # 估计 J_pool 用于计算 w_hat 的不确定性
+  X_pool <- rbind(X_target, X_source)
+  # 假设在 H0 下 w_hat 对全样本有效
+  eta_pool <- as.vector(X_pool %*% w_hat + intercept_w)
+  prob_pool <- 1 / (1 + exp(-eta_pool))
+  w_p <- prob_pool * (1 - prob_pool)
+  J_pool_inv <- solve(t(X_pool) %*% (diag(w_p) %*% X_pool) / n_total + 1e-8 * diag(p))
+  
+  # Var_w_hat 尺度为 1/n_total
+  Var_w_hat <- J_pool_inv / n_total
+  
+  pvals <- numeric(p)
+  
+  # 3. 逐变量计算补偿后的 Score Test
+  # 修正后的方差: V_j = Var_target(U_j) - Projection_Correction
+  # 这里的推导基于: U_j 依赖于 hat{w}, 而 hat{w} 又是数据的函数
+  for (j in 1:p) {
+    U_j <- sum(X_target[, j] * res_t)
+    
+    # --- 关键修正部分 ---
+    # 基础目标域方差 (n0 尺度)
+    V_target <- n0 * J_n[j, j] 
+    
+    # 补偿项：考虑 w_hat 波动对 U_j 的影响
+    # dUj/dw = n0 * J_n[j, ]
+    grad_j <- n0 * J_n[j, ]
+    V_compensation <- as.numeric(grad_j %*% Var_w_hat %*% grad_j)
+    
+    # 最终方差估计 (注意：由于 hat{w} 是使总 score 为 0 的点，
+    # 在目标域 score 上的方差实际上会因为这种“适应”而减小)
+    # 正确的方差形式应考虑两者相关的 Sandwich 结构
+    V_total <- V_target - V_compensation 
+    
+    # 确保方差为正
+    V_total <- max(V_total, 1e-8)
+    
+    S_j <- (U_j^2) / V_total
+    pvals[j] <- 1 - pchisq(S_j, df = 1)
+  }
+  
+  names(pvals) <- colnames(X_target)
+  return(pvals)
+}
+
+loglik_logistic <- function(y, X, beta, intercept = 0) {
+  eta <- as.vector(X %*% beta + intercept)
+  sum(y * eta - log(1 + exp(eta)))
+}
+
+LRT_delta_vector_1 <- function(
+    X_target, y_target,
+    X_source, y_source,
+    result
+) {
+  
+  ## ======================
+  ## 提取 A-Trans 结果
+  ## ======================
+  w_hat     <- as.numeric(result$w_hat)
+  delta_hat <- as.numeric(result$delta_hat)
+  
+  int_w    <- as.numeric(result$intercepts$intercept_w)
+  int_beta <- as.numeric(result$intercepts$intercept_beta)
+  
+  p <- length(delta_hat)
+  
+  ## ======================
+  ## Unconstrained model
+  ## ======================
+  ## source：单独 glm
+  fit_s <- glm(y_source ~ X_source, family = binomial())
+  coef_s <- coef(fit_s)
+  
+  intercept_s_hat <- coef_s[1]
+  beta_s_hat <- as.numeric(coef_s[-1])
+  
+  ll_U <-
+    loglik_logistic(
+      y_target, X_target,
+      w_hat + delta_hat,
+      int_beta
+    ) +
+    loglik_logistic(
+      y_source, X_source,
+      beta_s_hat,
+      intercept = intercept_s_hat
+    )
+  
+  ## ======================
+  ## Constrained model (H0: delta = 0)
+  ## source & target 都用 w_hat
+  ## ======================
+  ll_C <-
+    loglik_logistic(
+      y_target, X_target,
+      w_hat,
+      int_w
+    ) +
+    loglik_logistic(
+      y_source, X_source,
+      w_hat,
+      int_w
+    )
+  
+  ## ======================
+  ## LRT
+  ## ======================
+  LRT <- 2 * (ll_U - ll_C)
+  pval <- 1 - pchisq(max(0, LRT), df = p)
+  
+  return(list(
+    LRT = LRT,
+    df = p,
+    p_value = pval
+  ))
+}
+
+LRT_delta_vector_2 <- function(
+    X_target, y_target,
+    X_source, y_source,
+    result
+) {
+  
+  w_hat     <- as.numeric(result$w_hat)
+  delta_hat <- as.numeric(result$delta_hat)
+  int_w     <- as.numeric(result$intercepts$intercept_w)
+  int_beta  <- as.numeric(result$intercepts$intercept_beta)
+  
+  p <- length(delta_hat)
+  
+  ## Only target likelihood matters
+  ll_U <- loglik_logistic(
+    y_target, X_target,
+    w_hat + delta_hat,
+    int_beta
+  )
+  
+  ll_C <- loglik_logistic(
+    y_target, X_target,
+    w_hat,
+    int_w
+  )
+  
+  LRT <- 2 * (ll_U - ll_C)
+  pval <- 1 - pchisq(max(0, LRT), df = p)
+  
+  return(list(LRT = LRT, df = p, p_value = pval))
+}
+```
+
+
+
+```{r}
+###################################
+### Step11:变量层级可迁移性探索 ###
+###################################
+
+result1 <- A_Trans_logistic(
+  X_target_2, y_target_2,
+  X_source_2, y_source_2,
+  A = NULL,            # transferring set, 若设为 NULL 则默认使用所有源域
+  lambda_w = 0,     # transferring step 的 L1 正则参数
+  lambda_s = 0,     # debiasing step 的 L1 正则参数
+  max_iter = 1000,
+  tol = 1e-6
+)
+
+result1_CI_C <- C_Trans_CI_logistic(
+  X_target_2, y_target_2,
+  X_source_2, y_source_2,
+  result1,            # 必须：Algorithm1 的输出（包含 result_trans$beta_hat）
+  alpha = 0.05
+)
+
+result1_CI_D <- D_Trans_CI_logistic(
+  X_target_2, y_target_2,
+  X_source_2, y_source_2,
+  result1,
+  alpha = 0.05
+)
+
+delta_score_test_refined(X_target_2, y_target_2, X_source_2, y_source_2, result1$w_hat, result1$intercepts$intercept_w)
+
+lrt_res_1 <- LRT_delta_vector_1(
+  X_target = X_target_2,
+  y_target = y_target_2,
+  X_source = X_source_2,
+  y_source = y_source_2,
+  result   = result1
+)
+lrt_res_1
+
+lrt_res_2 <- LRT_delta_vector_2(
+  X_target = X_target_2,
+  y_target = y_target_2,
+  X_source = X_source_2,
+  y_source = y_source_2,
+  result   = result1
+)
+lrt_res_2
+
+use_C_vars <- c("Ethnicity1", "BMI2")
+
+trans_CI_df_1 <-
+  result1_CI_D$ci_table %>%
+  dplyr::left_join(
+    result1_CI_C$ci_table,
+    by = "Variable",
+    suffix = c("_D", "_C")
+  ) %>%
+  dplyr::mutate(
+    CI_lower_Trans = ifelse(
+      Variable %in% use_C_vars,
+      CI_lower_C,
+      CI_lower_D
+    ),
+    CI_upper_Trans = ifelse(
+      Variable %in% use_C_vars,
+      CI_upper_C,
+      CI_upper_D
+    )
+  ) %>%
+  dplyr::select(
+    Variable,
+    CI_lower_Trans,
+    CI_upper_Trans
+  )
+```
+
+
+
+```{r}
+###################################
+### Step11:变量层级可迁移性探索 ###
+###################################
+
+final_SE_df_1 <-
+  result1_CI_D$ci_table %>%
+  dplyr::select(Variable, SE_final = SE) %>%
+  dplyr::rows_update(
+    result1_CI_C$ci_table %>%
+      dplyr::filter(Variable %in% c("Ethnicity1", "BMI2")) %>%
+      dplyr::select(Variable, SE_final = SE),
+    by = "Variable"
+  )
+
+# 从 result2_CI_C 中获取 Variable 列表和顺序作为参考
+variable_names <- result1_CI_C$ci_table$Variable
+
+# 提取并合并所有 Estimate 值
+intercept_estimate <- as.numeric(result1$intercepts$intercept_beta)
+covariate_estimate <- as.numeric(result1$beta_hat)
+
+if (length(covariate_estimate) != (length(variable_names) - 1)) {
+  stop("result$beta_hat 的长度与变量数量不匹配。")
+}
+
+# 构造完整的 Estimate 数据框
+final_estimate_df_1 <- data.frame(
+  Variable = variable_names,
+  Estimate = c(
+    intercept_estimate,
+    covariate_estimate
+  ),
+  stringsAsFactors = FALSE
+)
+
+# 3. 合并最终的 Estimate 和最终选择的 SE
+final_results_trans_1 <- final_estimate_df_1 %>%
+  dplyr::left_join(final_SE_df_1, by = "Variable")
+final_results_trans_1$z_value <- with(final_results_trans_1, Estimate / SE_final)
+final_results_trans_1$p_value <- with(final_results_trans_1, 2 * pnorm(abs(z_value), lower.tail = FALSE))
+
+# 4. 构造命名向量，用于 calc_curve_with_ci
+coef_trans_1 <- setNames(final_results_trans_1$Estimate, final_results_trans_1$Variable)
+se_trans_1 <- setNames(final_results_trans_1$SE_final, final_results_trans_1$Variable)
+```
+
+
+
+```{r}
+###################################
+### Step11:变量层级可迁移性探索 ###
+###################################
+
+for (key_var in names(key_vars_list)) {
+  
+  # 在循环内部定义所有必要的局部变量：
+  tau <- key_vars_list[[key_var]]$tau
+  x_seq <- key_vars_list[[key_var]]$seq
+  phi_var <- paste0(key_var, "_phi")
+  
+  message(paste("Calculating curves for GLM:", key_var))
+  
+  # --- GLM 计算 ---
+  df_glm <- calc_curve_with_ci(
+    x_seq = x_seq, tau = tau, key_var = key_var,
+    beta_g = coef_est[key_var],
+    beta_phi = coef_est[phi_var],
+    se_g = se_est[key_var],
+    se_phi = se_est[phi_var],
+    coef_all = coef_est,
+    se_all_full = se_est, # GLM SE
+    X_ref = X_target_2, # 假设 GLM 和 Trans 使用相同的参考数据进行曲线绘制
+    model_label = "GLM"
+  )
+  
+  # --- A-Trans 计算 ---
+  message(paste("Calculating curves for A-Trans:", key_var))
+  
+  df_trans <- calc_curve_with_ci(
+    x_seq = x_seq, tau = tau, key_var = key_var,
+    beta_g = coef_trans_1[key_var],
+    beta_phi = coef_trans_1[phi_var],
+    se_g = se_trans_1[key_var],
+    se_phi = se_trans_1[phi_var],
+    coef_all = coef_trans_1,
+    se_all_full = se_trans_1, # Trans SE
+    X_ref = X_target_2, 
+    model_label = "A-Trans"
+  )
+  
+  # 合并 GLM 和 Trans 结果
+  all_df[[key_var]] <- rbind(df_glm, df_trans)
+}
+
+# 合并所有计算结果，用于绘图
+combined_plot_data_1 <- do.call(rbind, all_df)
+```
+
+
+
+```{r}
+###################################
+### Step11:变量层级可迁移性探索 ###
+###################################
+
+combined_plot_data_1 <- combined_plot_data_1 %>%
+  # 1. 合并标准化参数查找表
+  left_join(scaling_df, by = "key_var") %>%
+  
+  # 2. 计算 x_var_original
+  mutate(
+    # X_original = X_scaled * sigma + mu
+    x_var_original = x_var * sigma_val + mu_val
+  ) %>%
+  
+  # 3. 移除用于计算的临时列
+  dplyr::select(-mu_val, -sigma_val)
+
+# 1. ghb 图
+ghb_params <- get_params("ghb", tha_scaled_trun)
+tau_ghb_original <- key_vars_list$ghb$tau * ghb_params$sigma + ghb_params$mu
+
+ghb_plots <- plot_curve_all(combined_plot_data_1, tau_ghb_original, "ghb", "ghb (Original Scale)")
+
+grid.arrange(ghb_plots$p1, ghb_plots$p2, ncol = 2, 
+             top = "ghb Threshold Effect: Logit and Predicted Probability")
+
+# 2. Age 图
+age_params <- get_params("Age", tha_scaled_trun)
+tau_age_original <- key_vars_list$Age$tau * age_params$sigma + age_params$mu
+
+age_plots <- plot_curve_all(combined_plot_data_1, tau_age_original, "Age", "Age (Original Scale)")
+
+grid.arrange(age_plots$p1, age_plots$p2, ncol = 2, 
+             top = "Age Threshold Effect: Logit and Predicted Probability")
+```
+
+
+
+```{r}
+###################################
+### Step11:变量层级可迁移性探索 ###
+###################################
+
+# ----------------------------------------------------
+# 步骤 4: 评估 A-Trans/阈值 GLM 模型 (基于 coef_trans)
+# ----------------------------------------------------
+
+# 获取 A-Trans 模型所需的协变量名称和顺序（这些名称应包含阈值项的名称）
+coef_names_trans_1 <- names(coef_trans_1)
+
+# 重新排列/选择 X 矩阵的列，使其与 coef_trans 的名称顺序严格一致
+X_trans_matched_1 <- X_target_2_intercept[, coef_names_trans_1, drop = FALSE]
+
+prob_trans_1 <- predict_glm_prob(X_trans_matched_1, coef_trans_1)
+k_trans_1 <- length(coef_trans_1)
+eval_trans_1 <- evaluate_model(prob_trans_1, y_target_2, k_trans_1)
+
+# ----------------------------------------------------
+# 步骤 5: 生成对比表格
+# ----------------------------------------------------
+
+comparison_table_1 <- data.frame(
+  Model = c("GLM (coef_est)", "A-Trans(coef_trans)"),
+  AIC = c(eval_est$AIC, eval_trans_1$AIC),
+  AUC = c(eval_est$AUC, eval_trans_1$AUC),
+  Num_Parameters = c(k_est, k_trans_1)
+) %>%
+  mutate(
+    AIC = round(AIC, 3),
+    AUC = round(AUC, 3)
+  )
+
+print("--- 模型评估对比表 ---")
+print(comparison_table_1)
+```
+
+
+
+```{r}
+###################################
+### Step12:LRT/SCORE simulation ###
+###################################
+
+loglik_logistic <- function(y, X, beta, intercept = 0) {
+  eta <- as.vector(X %*% beta + intercept)
+  # 数值稳定版防止 exp 溢出
+  sum(y * eta - log(1 + exp(eta)))
+}
+
+generate_X <- function(n, p, type = c("indep", "corr", "nonnormal")) {
+  type <- match.arg(type)
+  
+  if (type == "indep") {
+    X <- matrix(rnorm(n * p), n, p)
+    
+  } else if (type == "corr") {
+    Sigma <- 0.5 ^ abs(outer(1:p, 1:p, "-"))
+    X <- MASS::mvrnorm(n, mu = rep(0, p), Sigma = Sigma)
+    
+  } else if (type == "nonnormal") {
+    X <- matrix(NA, n, p)
+    X[, 1:2] <- matrix(rt(n * 2, df = 3), n, 2)   # heavy-tail
+    X[, 3:4] <- matrix(rexp(n * 2) - 1, n, 2)     # skewed
+    X[, 5]   <- rnorm(n)
+  }
+  
+  colnames(X) <- paste0("X", 1:p)
+  X
+}
+
+generate_delta <- function(type = c("null", "local", "alt")) {
+  type <- match.arg(type)
+  
+  if (type == "null") {
+    rep(0, 5)
+  } else if (type == "local") {
+    c(0, 0, 0.05, 0.05, 0)
+  } else {
+    c(0.5, 0.5, 0, 0, 0)
+  }
+}
+
+generate_X_threshold <- function(n, p = 5, type = c("indep", "corr", "nonnormal"), tau_true = 0) {
+  type <- match.arg(type)
+  
+  if (type == "indep") {
+    Z <- matrix(rnorm(n * p), n, p)
+  } else if (type == "corr") {
+    Sigma <- 0.5 ^ abs(outer(1:p, 1:p, "-"))
+    Z <- MASS::mvrnorm(n, mu = rep(0, p), Sigma = Sigma)
+  } else if (type == "nonnormal") {
+    Z <- matrix(NA, n, p)
+    Z[, 1:2] <- matrix(rt(n * 2, df = 3), n, 2)   # heavy-tail
+    Z[, 3:4] <- matrix(rexp(n * 2) - 1, n, 2)     # skewed
+    Z[, 5]   <- rnorm(n)
+  }
+  
+  # 强制将 X2 修改为基于 X1 的变点项: (X1 - tau)_+
+  X <- Z
+  X[, 2] <- pmax(X[, 1] - tau_true, 0)
+  colnames(X) <- paste0("X", 1:p)
+  return(X)
+}
+
+generate_delta_threshold <- function(type = c("null", "local", "alt")) {
+  type <- match.arg(type)
+  if (type == "null") {
+    rep(0, 5)
+  } else if (type == "local") {
+    c(0, 0, 0.01, 0.01, 0)
+  } else {
+    c(0.5, 0.5, 0, 0, 0) 
+  }
+}
+```
+
+
+
+```{r}
+###################################
+### Step12:LRT/SCORE simulation ###
+###################################
+
+# ----------------------------------------------------
+# LRT_joint的多种simulation实验
+# ----------------------------------------------------
+
+# ================================================================
+# 1. 逻辑：利用目标域 + 源域的似然变化进行 H0: delta = 0 的联合检验
+# ================================================================
+LRT_delta_vector_1 <- function(X_target, y_target, X_source, y_source, result) {
+  w_hat     <- as.numeric(result$w_hat)
+  delta_hat <- as.numeric(result$delta_hat)
+  int_w     <- as.numeric(result$intercepts$intercept_w)
+  int_beta  <- as.numeric(result$intercepts$intercept_beta)
+  p <- length(delta_hat)
+  
+  ## Unconstrained model: source 独立 MLE
+  # 抑制 glm 的数值警告，避免干扰流程
+  fit_s <- suppressWarnings(glm(y_source ~ X_source, family = binomial()))
+  coef_s <- coef(fit_s)
+  int_s_hat <- coef_s[1]
+  beta_s_hat <- as.numeric(coef_s[-1])
+  
+  ll_U <- loglik_logistic(y_target, X_target, w_hat + delta_hat, int_beta) +
+          loglik_logistic(y_source, X_source, beta_s_hat, int_s_hat)
+  
+  ## Constrained model: 两域共用 w_hat
+  ll_C <- loglik_logistic(y_target, X_target, w_hat, int_w) +
+          loglik_logistic(y_source, X_source, w_hat, int_w)
+  
+  LRT <- 2 * (ll_U - ll_C)
+  pval <- 1 - pchisq(max(0, LRT), df = p)
+  
+  return(list(LRT = LRT, df = p, p_value = pval))
+}
+
+# ================================================================
+# 2. 单次模拟函数 (one_rep_sim_LRT_joint)
+# ================================================================
+one_rep_sim_LRT_joint <- function(X_type, delta_type, n_t = 500, n_s = 3000, p = 5) {
+  tryCatch({
+    # --- 1. 增加明确的 tau_true 参数 ---
+    tau_true   <- 0.5
+    w_true     <- rep(0.5, p)
+    delta_true <- generate_delta_threshold(delta_type)
+    beta_t     <- w_true + delta_true
+    
+    # --- 2. 参数对齐：传入 type 和 tau_true ---
+    X_t <- generate_X_threshold(n_t, p, type = X_type, tau_true = tau_true)
+    X_s <- generate_X_threshold(n_s, p, type = X_type, tau_true = tau_true)
+    
+    # --- 3. 【最核心修改】：加入截距项 -1，防止概率全为 1 导致的 GLM 崩溃 ---
+    y_t <- rbinom(n_t, 1, plogis(X_t %*% beta_t - 1))
+    y_s <- rbinom(n_s, 1, plogis(X_s %*% w_true - 1))
+    
+    # 估计 A-Trans
+    res <- suppressWarnings(
+      A_Trans_logistic(X_target = X_t, y_target = y_t, X_source = X_s, y_source = y_s,
+                       lambda_w = 1e-4, lambda_s = 1e-4)
+    )
+    
+    # 联合检验
+    test <- LRT_delta_vector_1(X_t, y_t, X_s, y_s, result = res)
+    return(test$p_value)
+    
+  }, error = function(e) {
+    cat("Error:", e$message, "\n")
+    return(NA_real_)
+  })
+}
+
+# ================================================================
+# 3. 模拟主控函数 (run_simulation_LRT_joint)
+# ================================================================
+run_simulation_LRT_joint <- function(MC = 500, X_type, delta_type) {
+  # 显式使用 as.numeric 确保返回向量
+  pvals <- as.numeric(replicate(MC, one_rep_sim_LRT_joint(X_type, delta_type)))
+  
+  valid_pvals <- pvals[!is.na(pvals)]
+  n_valid <- length(valid_pvals)
+  
+  if(n_valid == 0) return(c(0, 0, 0)) # 兜底防止除以0
+  
+  return(c(
+    mean_pval   = mean(valid_pvals),
+    reject_rate = mean(valid_pvals < 0.05),
+    valid_rate  = n_valid / MC
+  ))
+}
+
+# ================================================================
+# 4. 执行并生成最终表
+# ================================================================
+settings <- expand.grid(
+  X_type = c("indep", "corr", "nonnormal"),
+  delta_type = c("null", "local", "alt"),
+  stringsAsFactors = FALSE
+)
+
+sim_results_LRT_joint <- settings %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    res = list(run_simulation_LRT_joint(MC = 500, X_type = X_type, delta_type = delta_type))
+  ) %>%
+  dplyr::mutate(
+    mean_pval   = res[1],  # 修正：直接按索引取
+    reject_rate = res[2],
+    valid_rate  = res[3]
+  ) %>%
+  dplyr::select(-res) %>%
+  dplyr::ungroup()
+
+print(sim_results_LRT_joint)
+```
+
+
+
+```{r}
+###################################
+### Step12:LRT/SCORE simulation ###
+###################################
+
+# ----------------------------------------------------
+# LRT_target的多种simulation实验
+# ----------------------------------------------------
+# ================================================================
+# 1. 逻辑：仅利用目标域的似然变化进行 H0: delta = 0 的联合检验
+# ================================================================
+LRT_delta_vector_2 <- function(X_target, y_target, X_source, y_source, result) {
+  # 显式转换确保类型正确
+  w_hat     <- as.numeric(result$w_hat)
+  delta_hat <- as.numeric(result$delta_hat)
+  int_w     <- as.numeric(result$intercepts$intercept_w)
+  int_beta  <- as.numeric(result$intercepts$intercept_beta)
+  p <- length(delta_hat)
+  
+  # 无约束似然 (Full Model): 使用 beta_hat = w_hat + delta_hat
+  ll_U <- loglik_logistic(y_target, X_target, w_hat + delta_hat, int_beta)
+  
+  # 约束似然 (Null Model): H0: delta = 0, 仅使用 w_hat
+  ll_C <- loglik_logistic(y_target, X_target, w_hat, int_w)
+  
+  # 似然比统计量 (由于 lambda 控制，确保其非负)
+  LRT <- 2 * (ll_U - ll_C)
+  pval <- 1 - pchisq(max(0, LRT), df = p)
+  
+  return(list(LRT = LRT, df = p, p_value = pval))
+}
+
+# ================================================================
+# 2. 单次模拟函数：one_rep_sim_LRT_target
+# ================================================================
+one_rep_sim_LRT_target <- function(X_type, delta_type, n_t = 500, n_s = 3000, p = 5) {
+  tryCatch({
+    # 真参数设置 (增加 tau_true)
+    tau_true   <- 0.5
+    w_true     <- rep(0.5, p)
+    delta_true <- generate_delta_threshold(delta_type)
+    beta_t     <- w_true + delta_true
+    
+    # 数据生成 (加入 tau_true 参数)
+    X_t <- generate_X_threshold(n_t, p, type = X_type, tau_true = tau_true)
+    X_s <- generate_X_threshold(n_s, p, type = X_type, tau_true = tau_true)
+    
+    # 关键修改：加入截距 -1，防止完全分离
+    y_t <- rbinom(n_t, 1, plogis(X_t %*% beta_t - 1))
+    y_s <- rbinom(n_s, 1, plogis(X_s %*% w_true - 1))
+    
+    res <- suppressWarnings(
+      A_Trans_logistic(X_target = X_t, y_target = y_t, X_source = X_s, y_source = y_s,
+                       lambda_w = 1e-4, lambda_s = 1e-4)
+    )
+    
+    test <- LRT_delta_vector_2(X_t, y_t, X_s, y_s, result = res)
+    return(test$p_value)
+    
+  }, error = function(e) {
+    return(NA_real_)
+  })
+}
+
+# ================================================================
+# 3. 模拟主控函数：run_simulation_LRT_target
+# ================================================================
+run_simulation_LRT_target <- function(MC = 500, X_type, delta_type) {
+  # 迭代运行并向量化结果
+  pvals <- as.numeric(replicate(MC, one_rep_sim_LRT_target(X_type, delta_type)))
+  
+  # 过滤异常值
+  valid_pvals <- pvals[!is.na(pvals)]
+  n_valid <- length(valid_pvals)
+  
+  # 杜绝 reject_rate = NA 的最后防线
+  if (n_valid == 0) return(c(mean_pval = NA, reject_rate = NA, valid_rate = 0))
+  
+  return(c(
+    mean_pval   = mean(valid_pvals),
+    reject_rate = mean(valid_pvals < 0.05),
+    valid_rate  = n_valid / MC
+  ))
+}
+
+# ================================================================
+# 4. 多场景仿真实验
+# ================================================================
+library(MASS)
+library(dplyr)
+
+# 定义配置矩阵
+settings <- expand.grid(
+  X_type = c("indep", "corr", "nonnormal"),
+  delta_type = c("null", "local", "alt"),
+  stringsAsFactors = FALSE
+)
+
+# 执行 Pipeline 并格式化输出
+sim_results_LRT_target <- settings %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    # 运行仿真并存储为 list
+    res = list(run_simulation_LRT_target(MC = 500, X_type = X_type, delta_type = delta_type))
+  ) %>%
+  dplyr::mutate(
+    # 统一按索引提取数值，避免类型不匹配导致的 NA
+    mean_pval   = res[1],
+    reject_rate = res[2],
+    valid_rate  = res[3]
+  ) %>%
+  dplyr::select(-res) %>%
+  dplyr::ungroup()
+
+# 打印结果预览
+print(sim_results_LRT_target)
+```
+
+
+
+```{r}
+###################################
+### Step12:LRT/SCORE simulation ###
+###################################
+
+# ----------------------------------------------------
+# SCORE_single的多种simulation实验
+# ----------------------------------------------------
+one_rep_sim_Score_refined <- function(
+    X_type, delta_type,
+    n_t = 500, n_s = 3000, p = 5
+) {
+  tryCatch({
+    # --- 1. 生成参数 --- (增加 tau_true)
+    tau_true   <- 0.5
+    w_true     <- rep(0.5, p)
+    delta_true <- generate_delta_threshold(delta_type)
+    beta_t     <- w_true + delta_true
+    
+    # --- 2. 生成数据 --- (加入 tau_true 参数)
+    X_t <- generate_X_threshold(n_t, p, type = X_type, tau_true = tau_true)
+    X_s <- generate_X_threshold(n_s, p, type = X_type, tau_true = tau_true)
+    
+    # 关键修改：加入截距 -1
+    y_t <- rbinom(n_t, 1, plogis(X_t %*% beta_t - 1))
+    y_s <- rbinom(n_s, 1, plogis(X_s %*% w_true - 1))
+    
+    # --- 3. 迁移估计 (A-Trans) ---
+    res <- suppressWarnings(
+      A_Trans_logistic(
+        X_target = X_t, y_target = y_t,
+        X_source = X_s, y_source = y_s,
+        lambda_w = 1e-4,
+        lambda_s = 1e-4
+      )
+    )
+    
+    # --- 4. 逐变量 Score Test ---
+    p_vals <- delta_score_test_refined(
+      X_target = X_t, y_target = y_t,
+      X_source = X_s, y_source = y_s,
+      w_hat = res$w_hat,
+      intercept_w = res$intercepts$intercept_w
+    )
+    
+    return(p_vals)
+    
+  }, error = function(e) {
+    return(rep(NA_real_, p))
+  })
+}
+
+run_simulation_Score_refined <- function(MC = 500, X_type, delta_type) {
+  # 运行模拟，得到 p x MC 矩阵
+  pvals_mat <- replicate(MC, one_rep_sim_Score_refined(X_type, delta_type))
+  
+  # 转置为 MC x p
+  pvals_mat <- t(pvals_mat)
+  
+  # 1. 计算每个变量的拒绝率 (Size/Power)
+  # 结果为 c(V1 = rate1, V2 = rate2, ...)
+  reject_rates <- colMeans(pvals_mat < 0.05, na.rm = TRUE)
+  
+  names(reject_rates) <- paste0("Rej_X", 1:length(reject_rates))
+  
+  # 2. 计算有效模拟比例
+  valid_rate <- sum(complete.cases(pvals_mat)) / MC
+  
+  # 合并结果为一个扁平向量返回
+  return(c(reject_rates, valid_rate = valid_rate))
+}
+
+library(dplyr)
+library(tidyr)
+library(MASS)
+
+# 确保单次重复函数 one_rep_sim_Score_refined 已定义（同方案三）
+
+# 1. 定义实验配置
+settings <- expand.grid(
+  X_type = c("indep", "corr", "nonnormal"),
+  delta_type = c("null", "local", "alt"),
+  stringsAsFactors = FALSE
+)
+
+# 2. 执行实验并展开变量表现
+sim_results_Score_refined <- settings %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    # 得到的结果是一个包含 V1~Vp 拒绝率的向量
+    sim_stats = list(run_simulation_Score_refined(
+      MC = 500,
+      X_type = X_type,
+      delta_type = delta_type
+    ))
+  ) %>%
+  dplyr::ungroup() %>%
+  # 核心修改：将向量中的 V1, V2, ..., valid_rate 展开为独立的列
+  tidyr::unnest_wider(sim_stats)
+
+# 3. 输出展示
+# 这样您可以直接看到每个变量在不同数据类型和假设下的具体拒绝率
+print(sim_results_Score_refined)
+```
+
+
+
+```{r fig.width=10, fig.height=15}
+#######################################
+### Step13:Translearning simulation ###
+#######################################
+
+library(dplyr)
+library(tidyr)
+library(MASS)
+library(ggplot2)
+library(gridExtra)
+library(pbapply)
+library(parallel)
+
+# ================================================================
+# 1. 带变点效应的丰富数据生成器 (DGP)
+# ================================================================
+generate_X_threshold <- function(n, p = 5, type = c("indep", "corr", "nonnormal"), tau_true = 0) {
+  type <- match.arg(type)
+  
+  if (type == "indep") {
+    Z <- matrix(rnorm(n * p), n, p)
+  } else if (type == "corr") {
+    Sigma <- 0.5 ^ abs(outer(1:p, 1:p, "-"))
+    Z <- MASS::mvrnorm(n, mu = rep(0, p), Sigma = Sigma)
+  } else if (type == "nonnormal") {
+    Z <- matrix(NA, n, p)
+    Z[, 1:2] <- matrix(rt(n * 2, df = 3), n, 2)   # heavy-tail
+    Z[, 3:4] <- matrix(rexp(n * 2) - 1, n, 2)     # skewed
+    Z[, 5]   <- rnorm(n)
+  }
+  
+  # 强制将 X2 修改为基于 X1 的变点项: (X1 - tau)_+
+  X <- Z
+  X[, 2] <- pmax(X[, 1] - tau_true, 0)
+  colnames(X) <- paste0("X", 1:p)
+  return(X)
+}
+
+generate_delta_threshold <- function(type = c("null", "local", "alt")) {
+  type <- match.arg(type)
+  if (type == "null") {
+    rep(0, 5)
+  } else if (type == "local") {
+    c(0, 0, 0.01, 0.01, 0)
+  } else {
+    c(0.5, 0.5, 0, 0, 0) 
+  }
+}
+
+# ================================================================
+# 2. 单次模拟函数 (增加了 GLM 提取的容错保护)
+# ================================================================
+one_rep_sim_Estimation_threshold <- function(X_type, delta_type, n_t = 300, n_s = 3000, p = 5) {
+  tryCatch({
+    # --- 1. 生成真实参数 ---
+    tau_true   <- 0.5           
+    w_true     <- rep(0.5, p)   
+    delta_true <- generate_delta_threshold(delta_type)
+    beta_true  <- w_true + delta_true 
+    int_true   <- -1            
+    
+    # --- 2. 生成带变点的复杂数据 ---
+    X_t <- generate_X_threshold(n_t, p, type = X_type, tau_true = tau_true)
+    X_s <- generate_X_threshold(n_s, p, type = X_type, tau_true = tau_true)
+    
+    y_t <- rbinom(n_t, 1, plogis(X_t %*% beta_true + int_true))
+    y_s <- rbinom(n_s, 1, plogis(X_s %*% w_true + int_true))
+    
+    # --- 3. 基线模型：目标域独立拟合 GLM ---
+    df_t <- data.frame(Y = y_t, X_t)
+    fit_glm <- suppressWarnings(glm(Y ~ ., family = binomial(), data = df_t))
+    
+    # 【修复部分】安全提取系数和标准误，防止秩亏或完全分离导致的崩溃
+    coef_glm <- coef(fit_glm)[-1] # 长度必为 p，不收敛的变量会是 NA
+    se_glm <- rep(NA, p)
+    names(se_glm) <- paste0("X", 1:p)
+    
+    sum_coef <- summary(fit_glm)$coefficients
+    # 只提取成功计算出标准误的变量
+    valid_vars <- intersect(names(se_glm), rownames(sum_coef))
+    if (length(valid_vars) > 0) {
+      se_glm[valid_vars] <- sum_coef[valid_vars, "Std. Error"]
+    }
+    
+    ci_low_glm <- coef_glm - 1.96 * as.numeric(se_glm)
+    ci_up_glm  <- coef_glm + 1.96 * as.numeric(se_glm)
+    
+    # --- 4. 迁移学习模型 (完全调用你的 A_Trans_logistic) ---
+    res_trans <- suppressWarnings(
+      A_Trans_logistic(X_target = X_t, y_target = y_t, 
+                       X_source = X_s, y_source = y_s,
+                       lambda_w = 1e-4, lambda_s = 1e-3)
+    )
+    
+    res_CI_C <- C_Trans_CI_logistic(X_t, y_t, X_s, y_s, res_trans, alpha = 0.05)
+    res_CI_D <- D_Trans_CI_logistic(X_t, y_t, X_s, y_s, res_trans, alpha = 0.05)
+    
+    delta_hat <- as.numeric(res_trans$delta_hat)
+    ci_low_trans <- numeric(p)
+    ci_up_trans  <- numeric(p)
+    
+    for(j in 1:p) {
+      if(abs(delta_hat[j]) < 1e-6) {
+        ci_low_trans[j] <- res_CI_C$ci_table$CI_lower[j+1] 
+        ci_up_trans[j]  <- res_CI_C$ci_table$CI_upper[j+1]
+      } else {
+        ci_low_trans[j] <- res_CI_D$ci_table$CI_lower[j+1]
+        ci_up_trans[j]  <- res_CI_D$ci_table$CI_upper[j+1]
+      }
+    }
+    coef_trans <- as.numeric(res_trans$beta_hat)
+    
+    # --- 5. 组装结果 ---
+    res_df <- data.frame(
+      Variable = paste0("X", 1:p),
+      Beta_True = beta_true,
+      Beta_GLM = as.numeric(coef_glm),
+      CI_Low_GLM = as.numeric(ci_low_glm),
+      CI_Up_GLM = as.numeric(ci_up_glm),
+      Beta_Trans = coef_trans,
+      CI_Low_Trans = ci_low_trans,
+      CI_Up_Trans = ci_up_trans,
+      stringsAsFactors = FALSE
+    )
+    return(res_df)
+    
+  }, error = function(e) {
+    # 如果还是崩溃，打印出来让我们知道原因
+    message("Simulation failed: ", e$message)
+    return(NULL) 
+  })
+}
+
+# ================================================================
+# 3. 模拟主控函数 (带进度条版)
+# ================================================================
+run_simulation_Estimation <- function(MC = 200, X_type, delta_type, n_t) {
+  
+  cat(sprintf("\n🚀 正在运行场景: 分布=[%s] | 异质性=[%s] | 目标样本量=[%d]\n", 
+              X_type, delta_type, n_t))
+  
+  n_cores <- max(1, detectCores() - 1) 
+  
+  results_list <- pblapply(1:MC, function(i) {
+    one_rep_sim_Estimation_threshold(X_type = X_type, delta_type = delta_type, n_t = n_t, n_s = 3000, p = 5)
+  }, cl = n_cores)
+  
+  results_list <- Filter(Negate(is.null), results_list)
+  if(length(results_list) == 0) return(NULL)
+  
+  all_res <- do.call(rbind, results_list)
+  
+  summary_res <- all_res %>%
+    group_by(Variable) %>%
+    summarise(
+      # 补回 Bias 的计算，且不加绝对值以保证 MSE = Bias^2 + Variance 严格成立
+      Bias_GLM = mean(Beta_GLM - Beta_True, na.rm=TRUE),
+      Bias_Trans = mean(Beta_Trans - Beta_True, na.rm=TRUE),
+      
+      MSE_GLM = mean((Beta_GLM - Beta_True)^2, na.rm=TRUE),
+      MSE_Trans = mean((Beta_Trans - Beta_True)^2, na.rm=TRUE),
+      CP_GLM = mean(Beta_True >= CI_Low_GLM & Beta_True <= CI_Up_GLM, na.rm=TRUE),
+      CP_Trans = mean(Beta_True >= CI_Low_Trans & Beta_True <= CI_Up_Trans, na.rm=TRUE),
+      Width_GLM = mean(CI_Up_GLM - CI_Low_GLM, na.rm=TRUE),
+      Width_Trans = mean(CI_Up_Trans - CI_Low_Trans, na.rm=TRUE),
+      .groups = 'drop'
+    )
+  
+  return(summary_res)
+}
+
+# ================================================================
+# 4. 执行实验 (耗时操作)
+# ================================================================
+set.seed(2026) 
+
+# 为了演示时间，这里仅选取 null 和 alt 两种异质性，以及 3 个样本量梯度
+est_settings <- expand.grid(
+  X_type = c("indep", "corr", "nonnormal"),
+  delta_type = c("null", "local", "alt"),
+  n_t = c(200, 500, 1000), 
+  stringsAsFactors = FALSE
+)
+
+cat("开始运行变点迁移学习性能模拟 (可能需要几分钟)...\n")
+sim_results_Estimation <- est_settings %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    sim_data = list(run_simulation_Estimation(MC = 200, X_type = X_type, delta_type = delta_type, n_t = n_t))
+  ) %>%
+  tidyr::unnest(sim_data) %>%
+  dplyr::ungroup()
+
+# ================================================================
+# 5. 结果可视化 (针对核心变点特征 X2)
+# ================================================================
+# 提取 X2 (阈值截断项) 的数据进行可视化
+plot_data_X2 <- sim_results_Estimation %>%
+  filter(Variable == "X2") %>%
+  # 转换为长格式以方便 ggplot 绘图
+  pivot_longer(cols = c(MSE_GLM, MSE_Trans, CP_GLM, CP_Trans), 
+               names_to = c("Metric", "Method"), 
+               names_sep = "_",
+               values_to = "Value") %>%
+  mutate(Method = factor(Method, levels = c("GLM", "Trans")))
+
+# 5.1 绘制 MSE 趋势图 (优化版)
+p_mse <- plot_data_X2 %>%
+  filter(Metric == "MSE") %>%
+  ggplot(aes(x = n_t, y = Value, color = Method, group = Method)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  facet_grid(delta_type ~ X_type, scales = "free_y") +
+  scale_color_manual(values = c("GLM" = "#FF7F0E", "Trans" = "#17BECF")) +
+  labs(title = "Empirical MSE of Threshold Effect (X2)",
+       subtitle = "Rows: Heterogeneity (delta_type) | Cols: Data Distribution (X_type)",
+       x = "Target Sample Size (n_t)", y = "Mean Squared Error (MSE)") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom", 
+    strip.background = element_rect(fill = "grey90"),
+    panel.spacing = unit(1.2, "lines"), # 🌟 增加各个小图之间的间距
+    axis.text.y = element_text(size = 9) # 调整字体大小
+  )
+
+# 5.2 绘制 CP (覆盖率) 趋势图 (优化版)
+p_cp <- plot_data_X2 %>%
+  filter(Metric == "CP") %>%
+  ggplot(aes(x = n_t, y = Value, color = Method, group = Method)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red") + 
+  facet_grid(delta_type ~ X_type) +
+  scale_color_manual(values = c("GLM" = "#FF7F0E", "Trans" = "#17BECF")) +
+  # 🌟 关键修改：将 breaks 改成 0.1，减少 Y 轴刻度数量，防止数字重叠
+  scale_y_continuous(limits = c(0.7, 1.0), breaks = seq(0.7, 1.0, 0.1)) +
+  labs(title = "Coverage Probability (CP) of Threshold Effect (X2)",
+       subtitle = "Dashed red line indicates 95% nominal level",
+       x = "Target Sample Size (n_t)", y = "Coverage Probability") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom", 
+    strip.background = element_rect(fill = "grey90"),
+    panel.spacing = unit(1.2, "lines"), # 🌟 增加间距
+    axis.text.y = element_text(size = 9) 
+  )
+
+# 打印图像
+grid.arrange(p_mse, p_cp, ncol = 1)
+
+# ================================================================
+# 5.3 进阶可视化：偏差-方差权衡 (Bias-Variance Trade-off)
+# ================================================================
+# 根据公式: MSE = Bias^2 + Variance -> Variance = MSE - Bias^2
+# 我们提取 X2 变量，计算平方偏差 (Bias_sq) 和方差 (Variance)
+plot_data_tradeoff <- sim_results_Estimation %>%
+  filter(Variable == "X2") %>%
+  mutate(
+    Bias_sq_GLM = Bias_GLM^2,
+    Variance_GLM = MSE_GLM - Bias_sq_GLM,
+    Bias_sq_Trans = Bias_Trans^2,
+    Variance_Trans = MSE_Trans - Bias_sq_Trans
+  ) %>%
+  # 整理成长格式，准备画堆叠条形图
+  dplyr::select(n_t, delta_type, X_type, 
+         Bias_sq_GLM, Variance_GLM, Bias_sq_Trans, Variance_Trans) %>%
+  pivot_longer(cols = c(Bias_sq_GLM, Variance_GLM, Bias_sq_Trans, Variance_Trans),
+               names_to = c("Component", "Method"),
+               names_pattern = "(.*)_(.*)",
+               values_to = "Value") %>%
+  mutate(
+    Method = factor(Method, levels = c("GLM", "Trans")),
+    # 确保 Variance 在堆叠图的下方，Bias_sq 在上方
+    Component = factor(Component, levels = c("Variance", "Bias_sq")) 
+  )
+
+# 绘制偏差-方差分解堆叠柱状图
+p_tradeoff <- ggplot(plot_data_tradeoff, aes(x = factor(n_t), y = Value, fill = Component)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.6) +
+  facet_grid(delta_type ~ X_type + Method, scales = "free_y") +
+  scale_fill_manual(values = c("Variance" = "#A0C4FF", "Bias_sq" = "#FFADAD"),
+                    labels = c("Variance", "Bias squared")) +
+  labs(title = "Bias-Variance Decomposition of MSE (Variable X2)",
+       subtitle = "Trans uses a slight increase in Bias to massively reduce Variance",
+       x = "Target Sample Size (n_t)",
+       y = "Mean Squared Error (Decomposed)",
+       fill = "Component") +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        strip.background = element_rect(fill = "grey90"),
+        panel.spacing = unit(0.5, "lines"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 打印图片
+print(p_tradeoff)
+
+# 输出表格摘要
+cat("\n=== X2 (变点项) 在 nonnormal 分布下的详细数据表 ===\n")
+print(sim_results_Estimation %>% 
+        filter(Variable == "X2" & X_type == "nonnormal") %>%
+        dplyr::select(n_t, delta_type, MSE_GLM, MSE_Trans, CP_GLM, CP_Trans, Width_GLM, Width_Trans), 
+      digits = 3)
+```
+
+
+
